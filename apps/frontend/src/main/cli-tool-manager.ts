@@ -1236,6 +1236,8 @@ class CLIToolManager {
         return this.detectGitAsync();
       case 'gh':
         return this.detectGitHubCLIAsync();
+      case 'glab':
+        return this.detectGitLabCLIAsync();
       default:
         return {
           found: false,
@@ -1433,6 +1435,39 @@ class CLIToolManager {
       return {
         valid: false,
         message: `Failed to validate GitHub CLI: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  }
+
+  /**
+   * Validate GitLab CLI availability and version asynchronously (non-blocking)
+   *
+   * @param glabCmd - The GitLab CLI command to validate
+   * @returns Promise resolving to validation result
+   */
+  private async validateGitLabCLIAsync(glabCmd: string): Promise<ToolValidation> {
+    try {
+      const { stdout } = await execFileAsync(glabCmd, ['--version'], {
+        encoding: 'utf-8',
+        timeout: 5000,
+        windowsHide: true,
+        env: await getAugmentedEnvAsync(),
+      });
+
+      const version = stdout.trim();
+      // glab version output format: "glab version X.Y.Z (YYYY-MM-DD)" or similar
+      const match = version.match(/glab version (\d+\.\d+\.\d+)/);
+      const versionStr = match ? match[1] : version.split('\n')[0];
+
+      return {
+        valid: true,
+        version: versionStr,
+        message: `GitLab CLI ${versionStr} is available`,
+      };
+    } catch (error) {
+      return {
+        valid: false,
+        message: `Failed to validate GitLab CLI: ${error instanceof Error ? error.message : String(error)}`,
       };
     }
   }
@@ -1860,6 +1895,104 @@ class CLIToolManager {
       found: false,
       source: 'fallback',
       message: 'GitHub CLI (gh) not found. Install from https://cli.github.com',
+    };
+  }
+
+  /**
+   * Detect GitLab CLI asynchronously (non-blocking)
+   *
+   * Same detection logic as detectGitLabCLI but uses async validation.
+   *
+   * @returns Promise resolving to detection result
+   */
+  private async detectGitLabCLIAsync(): Promise<ToolDetectionResult> {
+    // 1. User configuration
+    if (this.userConfig.gitlabCLIPath) {
+      if (isWrongPlatformPath(this.userConfig.gitlabCLIPath)) {
+        console.warn(
+          `[GitLab CLI] User-configured path is from different platform, ignoring: ${this.userConfig.gitlabCLIPath}`
+        );
+      } else {
+        const validation = await this.validateGitLabCLIAsync(this.userConfig.gitlabCLIPath);
+        if (validation.valid) {
+          return {
+            found: true,
+            path: this.userConfig.gitlabCLIPath,
+            version: validation.version,
+            source: 'user-config',
+            message: `Using user-configured GitLab CLI: ${this.userConfig.gitlabCLIPath}`,
+          };
+        }
+        console.warn(`[GitLab CLI] User-configured path invalid: ${validation.message}`);
+      }
+    }
+
+    // 2. Homebrew (macOS)
+    if (isMacOS()) {
+      const homebrewPaths = [
+        '/opt/homebrew/bin/glab',
+        '/usr/local/bin/glab',
+      ];
+
+      for (const glabPath of homebrewPaths) {
+        if (await existsAsync(glabPath)) {
+          const validation = await this.validateGitLabCLIAsync(glabPath);
+          if (validation.valid) {
+            return {
+              found: true,
+              path: glabPath,
+              version: validation.version,
+              source: 'homebrew',
+              message: `Using Homebrew GitLab CLI: ${glabPath}`,
+            };
+          }
+        }
+      }
+    }
+
+    // 3. System PATH (augmented)
+    const glabPath = await findExecutableAsync('glab');
+    if (glabPath) {
+      const validation = await this.validateGitLabCLIAsync(glabPath);
+      if (validation.valid) {
+        return {
+          found: true,
+          path: glabPath,
+          version: validation.version,
+          source: 'system-path',
+          message: `Using system GitLab CLI: ${glabPath}`,
+        };
+      }
+    }
+
+    // 4. Windows Program Files
+    if (isWindows()) {
+      const windowsPaths = [
+        'C:\\Program Files\\glab\\glab.exe',
+        'C:\\Program Files (x86)\\glab\\glab.exe',
+      ];
+
+      for (const winGlabPath of windowsPaths) {
+        if (await existsAsync(winGlabPath)) {
+          const validation = await this.validateGitLabCLIAsync(winGlabPath);
+          if (validation.valid) {
+            return {
+              found: true,
+              path: winGlabPath,
+              version: validation.version,
+              source: 'system-path',
+              message: `Using Windows GitLab CLI: ${winGlabPath}`,
+            };
+          }
+        }
+      }
+    }
+
+    // 5. Not found
+    return {
+      found: false,
+      source: 'fallback',
+      message: 'GitLab CLI (glab) not found. Install from https://gitlab.com/gitlab-org/cli',
     };
   }
 
