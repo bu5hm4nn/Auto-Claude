@@ -131,6 +131,16 @@ class PullRequestResult(TypedDict, total=False):
     message: str
 
 
+class MergeRequestResult(TypedDict, total=False):
+    """Result of creating a merge request."""
+
+    success: bool
+    mr_url: str | None  # None when MR was created but URL couldn't be extracted
+    already_exists: bool
+    error: str
+    message: str
+
+
 class PushAndCreatePRResult(TypedDict, total=False):
     """Result of push_and_create_pr operation."""
 
@@ -138,6 +148,7 @@ class PushAndCreatePRResult(TypedDict, total=False):
     pushed: bool
     remote: str
     branch: str
+    provider: str  # 'github', 'gitlab', or 'unknown'
     pr_url: str | None  # None when PR was created but URL couldn't be extracted
     already_exists: bool
     error: str
@@ -1407,6 +1418,7 @@ class WorktreeManager:
                 - success: bool
                 - pr_url: str (if created)
                 - pushed: bool (if push succeeded)
+                - provider: str ('github', 'gitlab', or 'unknown')
                 - already_exists: bool (if PR/MR already exists)
                 - error: str (if failed)
         """
@@ -1444,6 +1456,7 @@ class WorktreeManager:
                 pushed=True,
                 remote=push_result.get("remote"),
                 branch=push_result.get("branch"),
+                provider=provider,
                 error="Unable to determine git hosting provider. Supported: GitHub, GitLab.",
             )
 
@@ -1453,6 +1466,7 @@ class WorktreeManager:
             pushed=True,
             remote=push_result.get("remote"),
             branch=push_result.get("branch"),
+            provider=provider,
             pr_url=pr_result.get("pr_url"),
             already_exists=pr_result.get("already_exists", False),
             error=pr_result.get("error"),
