@@ -954,6 +954,7 @@ class CLIToolManager {
         encoding: 'utf-8',
         timeout: 5000,
         windowsHide: true,
+        env: getAugmentedEnv(),
       }).trim();
 
       const match = version.match(/Python (\d+\.\d+\.\d+)/);
@@ -1004,6 +1005,7 @@ class CLIToolManager {
         encoding: 'utf-8',
         timeout: 5000,
         windowsHide: true,
+        env: getAugmentedEnv(),
       }).trim();
 
       const match = version.match(/git version (\d+\.\d+\.\d+)/);
@@ -1034,6 +1036,7 @@ class CLIToolManager {
         encoding: 'utf-8',
         timeout: 5000,
         windowsHide: true,
+        env: getAugmentedEnv(),
       }).trim();
 
       const match = version.match(/gh version (\d+\.\d+\.\d+)/);
@@ -1064,6 +1067,7 @@ class CLIToolManager {
         encoding: 'utf-8',
         timeout: 5000,
         windowsHide: true,
+        env: getAugmentedEnv(),
       }).trim();
 
       // glab version output format: "glab X.Y.Z (hash)" - note: no "version" word
