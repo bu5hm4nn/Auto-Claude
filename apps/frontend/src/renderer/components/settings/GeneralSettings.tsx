@@ -96,6 +96,7 @@ export function GeneralSettings({ settings, onSettingsChange, section }: General
     python: ToolDetectionResult;
     git: ToolDetectionResult;
     gh: ToolDetectionResult;
+    glab: ToolDetectionResult;
     claude: ToolDetectionResult;
   } | null>(null);
   const [isLoadingTools, setIsLoadingTools] = useState(false);
@@ -106,7 +107,7 @@ export function GeneralSettings({ settings, onSettingsChange, section }: General
       setIsLoadingTools(true);
       window.electronAPI
         .getCliToolsInfo()
-        .then((result: { success: boolean; data?: { python: ToolDetectionResult; git: ToolDetectionResult; gh: ToolDetectionResult; claude: ToolDetectionResult } }) => {
+        .then((result: { success: boolean; data?: { python: ToolDetectionResult; git: ToolDetectionResult; gh: ToolDetectionResult; glab: ToolDetectionResult; claude: ToolDetectionResult } }) => {
           if (result.success && result.data) {
             setToolsInfo(result.data);
           }
