@@ -7,8 +7,6 @@ Utility to detect git hosting provider (GitHub, GitLab, or unknown) from git rem
 Supports both SSH and HTTPS remote formats, and self-hosted GitLab instances.
 """
 
-from __future__ import annotations
-
 import re
 from pathlib import Path
 

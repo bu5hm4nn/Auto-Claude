@@ -10,8 +10,6 @@ other git configurations from affecting worktree operations.
 Separated into its own module to avoid circular imports.
 """
 
-from __future__ import annotations
-
 import os
 import shutil
 import subprocess

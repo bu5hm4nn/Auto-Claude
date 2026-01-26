@@ -14,8 +14,6 @@ This allows:
 4. Clear 1:1:1 mapping: spec → worktree → branch
 """
 
-from __future__ import annotations
-
 import asyncio
 import os
 import re

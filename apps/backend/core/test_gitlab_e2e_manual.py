@@ -14,8 +14,6 @@ Requirements:
     - Git repository with proper remotes configured
 """
 
-from __future__ import annotations
-
 import os
 import subprocess
 import sys

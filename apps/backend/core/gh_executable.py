@@ -6,8 +6,6 @@ GitHub CLI Executable Finder
 Utility to find the gh (GitHub CLI) executable, with platform-specific fallbacks.
 """
 
-from __future__ import annotations
-
 import os
 import shutil
 import subprocess
