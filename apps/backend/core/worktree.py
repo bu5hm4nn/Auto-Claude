@@ -28,6 +28,7 @@ from typing import TypedDict, TypeVar
 
 from core.gh_executable import get_gh_executable, invalidate_gh_cache
 from core.git_executable import get_git_executable, get_isolated_git_env, run_git
+from core.git_provider import detect_git_provider
 from core.glab_executable import get_glab_executable, invalidate_glab_cache
 from debug import debug_warning
 
@@ -1391,13 +1392,14 @@ class WorktreeManager:
         force_push: bool = False,
     ) -> PushAndCreatePRResult:
         """
-        Push branch and create a pull request in one operation.
+        Push branch and create a pull request/merge request in one operation.
+        Automatically detects git provider (GitHub or GitLab) and routes to the appropriate CLI.
 
         Args:
             spec_name: The spec folder name
-            target_branch: Target branch for PR (defaults to base_branch)
-            title: PR title (defaults to spec name)
-            draft: Whether to create as draft PR
+            target_branch: Target branch for PR/MR (defaults to base_branch)
+            title: PR/MR title (defaults to spec name)
+            draft: Whether to create as draft PR/MR
             force_push: Whether to force push the branch
 
         Returns:
@@ -1405,7 +1407,7 @@ class WorktreeManager:
                 - success: bool
                 - pr_url: str (if created)
                 - pushed: bool (if push succeeded)
-                - already_exists: bool (if PR already exists)
+                - already_exists: bool (if PR/MR already exists)
                 - error: str (if failed)
         """
         # Step 1: Push the branch
@@ -1417,13 +1419,33 @@ class WorktreeManager:
                 error=push_result.get("error", "Push failed"),
             )
 
-        # Step 2: Create the PR
-        pr_result = self.create_pull_request(
-            spec_name=spec_name,
-            target_branch=target_branch,
-            title=title,
-            draft=draft,
-        )
+        # Step 2: Detect git provider
+        provider = detect_git_provider(self.project_dir)
+
+        # Step 3: Create the PR/MR based on provider
+        if provider == "github":
+            pr_result = self.create_pull_request(
+                spec_name=spec_name,
+                target_branch=target_branch,
+                title=title,
+                draft=draft,
+            )
+        elif provider == "gitlab":
+            pr_result = self.create_merge_request(
+                spec_name=spec_name,
+                target_branch=target_branch,
+                title=title,
+                draft=draft,
+            )
+        else:
+            # Unknown provider
+            return PushAndCreatePRResult(
+                success=False,
+                pushed=True,
+                remote=push_result.get("remote"),
+                branch=push_result.get("branch"),
+                error="Unable to determine git hosting provider. Supported: GitHub, GitLab.",
+            )
 
         # Combine results
         return PushAndCreatePRResult(
