@@ -2993,8 +2993,9 @@ export function registerWorktreeHandlers(
           // Get Python environment for bundled packages
           const pythonEnv = pythonEnvManagerSingleton.getPythonEnv();
 
-          // Get gh CLI path to pass to Python backend
+          // Get CLI paths to pass to Python backend
           const ghCliPath = getToolPath('gh');
+          const glabCliPath = getToolPath('glab');
 
           // Parse Python command to handle space-separated commands like "py -3"
           const [pythonCommand, pythonBaseArgs] = parsePythonCommand(pythonPath);
@@ -3005,6 +3006,7 @@ export function registerWorktreeHandlers(
               ...pythonEnv,
               ...profileEnv,
               GITHUB_CLI_PATH: ghCliPath,
+              GITLAB_CLI_PATH: glabCliPath,
               PYTHONUNBUFFERED: '1',
               PYTHONUTF8: '1'
             },
