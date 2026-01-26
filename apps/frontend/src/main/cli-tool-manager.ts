@@ -1066,8 +1066,8 @@ class CLIToolManager {
         windowsHide: true,
       }).trim();
 
-      // glab version output format: "glab version X.Y.Z (YYYY-MM-DD)" or similar
-      const match = version.match(/glab version (\d+\.\d+\.\d+)/);
+      // glab version output format: "glab X.Y.Z (hash)" - note: no "version" word
+      const match = version.match(/glab\s+(\d+\.\d+\.\d+)/);
       const versionStr = match ? match[1] : version.split('\n')[0];
 
       return {
@@ -1455,8 +1455,8 @@ class CLIToolManager {
       });
 
       const version = stdout.trim();
-      // glab version output format: "glab version X.Y.Z (YYYY-MM-DD)" or similar
-      const match = version.match(/glab version (\d+\.\d+\.\d+)/);
+      // glab version output format: "glab X.Y.Z (hash)" - note: no "version" word
+      const match = version.match(/glab\s+(\d+\.\d+\.\d+)/);
       const versionStr = match ? match[1] : version.split('\n')[0];
 
       return {
