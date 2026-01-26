@@ -1091,7 +1091,7 @@ class WorktreeManager:
             invalidate_gh_cache()
             return PullRequestResult(
                 success=False,
-                error="gh CLI not found. Install from https://cli.github.com/",
+                error="GitHub CLI (gh) not found. Install from https://cli.github.com/",
             )
 
     def create_merge_request(
@@ -1246,7 +1246,7 @@ class WorktreeManager:
             invalidate_glab_cache()
             return PullRequestResult(
                 success=False,
-                error="glab CLI not found. Install from https://gitlab.com/gitlab-org/cli",
+                error="GitLab CLI (glab) not found. Install from https://gitlab.com/gitlab-org/cli",
             )
 
     def _extract_spec_summary(self, spec_name: str) -> str:
