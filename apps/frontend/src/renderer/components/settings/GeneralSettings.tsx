@@ -307,6 +307,24 @@ export function GeneralSettings({ settings, onSettingsChange, section }: General
           )}
         </div>
         <div className="space-y-3">
+          <Label htmlFor="gitlabCLIPath" className="text-sm font-medium text-foreground">{t('general.gitlabCLIPath')}</Label>
+          <p className="text-sm text-muted-foreground">{t('general.gitlabCLIPathDescription')}</p>
+          <Input
+            id="gitlabCLIPath"
+            placeholder={t('general.gitlabCLIPathPlaceholder')}
+            className="w-full max-w-lg"
+            value={settings.gitlabCLIPath || ''}
+            onChange={(e) => onSettingsChange({ ...settings, gitlabCLIPath: e.target.value })}
+          />
+          {!settings.gitlabCLIPath && (
+            <ToolDetectionDisplay
+              info={toolsInfo?.glab || null}
+              isLoading={isLoadingTools}
+              t={t}
+            />
+          )}
+        </div>
+        <div className="space-y-3">
           <Label htmlFor="claudePath" className="text-sm font-medium text-foreground">{t('general.claudePath')}</Label>
           <p className="text-sm text-muted-foreground">{t('general.claudePathDescription')}</p>
           <Input
