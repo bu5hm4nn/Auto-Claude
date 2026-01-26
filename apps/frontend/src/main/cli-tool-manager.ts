@@ -693,9 +693,11 @@ class CLIToolManager {
 
     // 4. Windows Program Files
     if (isWindows()) {
+      const programFiles = process.env.ProgramFiles || 'C:\\Program Files';
+      const programFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
       const windowsPaths = [
-        'C:\\Program Files\\GitHub CLI\\gh.exe',
-        'C:\\Program Files (x86)\\GitHub CLI\\gh.exe',
+        path.join(programFiles, 'GitHub CLI', 'gh.exe'),
+        path.join(programFilesX86, 'GitHub CLI', 'gh.exe'),
       ];
 
       for (const ghPath of windowsPaths) {
@@ -798,9 +800,11 @@ class CLIToolManager {
 
     // 4. Windows Program Files
     if (isWindows()) {
+      const programFiles = process.env.ProgramFiles || 'C:\\Program Files';
+      const programFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
       const windowsPaths = [
-        'C:\\Program Files\\glab\\glab.exe',
-        'C:\\Program Files (x86)\\glab\\glab.exe',
+        path.join(programFiles, 'glab', 'glab.exe'),
+        path.join(programFilesX86, 'glab', 'glab.exe'),
       ];
 
       for (const glabPath of windowsPaths) {
@@ -1873,9 +1877,11 @@ class CLIToolManager {
 
     // 4. Windows Program Files
     if (isWindows()) {
+      const programFiles = process.env.ProgramFiles || 'C:\\Program Files';
+      const programFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
       const windowsPaths = [
-        'C:\\Program Files\\GitHub CLI\\gh.exe',
-        'C:\\Program Files (x86)\\GitHub CLI\\gh.exe',
+        path.join(programFiles, 'GitHub CLI', 'gh.exe'),
+        path.join(programFilesX86, 'GitHub CLI', 'gh.exe'),
       ];
 
       for (const winGhPath of windowsPaths) {
@@ -1971,9 +1977,11 @@ class CLIToolManager {
 
     // 4. Windows Program Files
     if (isWindows()) {
+      const programFiles = process.env.ProgramFiles || 'C:\\Program Files';
+      const programFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
       const windowsPaths = [
-        'C:\\Program Files\\glab\\glab.exe',
-        'C:\\Program Files (x86)\\glab\\glab.exe',
+        path.join(programFiles, 'glab', 'glab.exe'),
+        path.join(programFilesX86, 'glab', 'glab.exe'),
       ];
 
       for (const winGlabPath of windowsPaths) {
