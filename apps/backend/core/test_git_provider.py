@@ -7,12 +7,18 @@ GitHub, GitLab (cloud and self-hosted), and unknown providers from remote URLs.
 """
 
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from git_provider import _classify_hostname, detect_git_provider
+# Add backend directory to path to import core package
+_backend_dir = Path(__file__).parent.parent
+if str(_backend_dir) not in sys.path:
+    sys.path.insert(0, str(_backend_dir))
+
+from core.git_provider import _classify_hostname, detect_git_provider
 
 
 @pytest.fixture
@@ -33,7 +39,7 @@ class TestDetectGitProviderSSH:
             stdout="git@github.com:user/repo.git\n",
         )
 
-        with patch("git_provider.run_git", return_value=mock_result):
+        with patch("core.git_provider.run_git", return_value=mock_result):
             provider = detect_git_provider(temp_repo_dir)
 
         assert provider == "github"
@@ -45,7 +51,7 @@ class TestDetectGitProviderSSH:
             stdout="git@gitlab.com:user/repo.git\n",
         )
 
-        with patch("git_provider.run_git", return_value=mock_result):
+        with patch("core.git_provider.run_git", return_value=mock_result):
             provider = detect_git_provider(temp_repo_dir)
 
         assert provider == "gitlab"
@@ -57,7 +63,7 @@ class TestDetectGitProviderSSH:
             stdout="git@gitlab.company.com:user/repo.git\n",
         )
 
-        with patch("git_provider.run_git", return_value=mock_result):
+        with patch("core.git_provider.run_git", return_value=mock_result):
             provider = detect_git_provider(temp_repo_dir)
 
         assert provider == "gitlab"
@@ -69,7 +75,7 @@ class TestDetectGitProviderSSH:
             stdout="git@git.example.com:user/repo.git\n",
         )
 
-        with patch("git_provider.run_git", return_value=mock_result):
+        with patch("core.git_provider.run_git", return_value=mock_result):
             provider = detect_git_provider(temp_repo_dir)
 
         # Should be unknown because 'gitlab' is not in hostname
@@ -82,7 +88,7 @@ class TestDetectGitProviderSSH:
             stdout="git@github.com:user/repo\n",
         )
 
-        with patch("git_provider.run_git", return_value=mock_result):
+        with patch("core.git_provider.run_git", return_value=mock_result):
             provider = detect_git_provider(temp_repo_dir)
 
         assert provider == "github"
@@ -98,7 +104,7 @@ class TestDetectGitProviderHTTPS:
             stdout="https://github.com/user/repo.git\n",
         )
 
-        with patch("git_provider.run_git", return_value=mock_result):
+        with patch("core.git_provider.run_git", return_value=mock_result):
             provider = detect_git_provider(temp_repo_dir)
 
         assert provider == "github"
@@ -110,7 +116,7 @@ class TestDetectGitProviderHTTPS:
             stdout="https://gitlab.com/user/repo.git\n",
         )
 
-        with patch("git_provider.run_git", return_value=mock_result):
+        with patch("core.git_provider.run_git", return_value=mock_result):
             provider = detect_git_provider(temp_repo_dir)
 
         assert provider == "gitlab"
@@ -122,7 +128,7 @@ class TestDetectGitProviderHTTPS:
             stdout="https://gitlab.enterprise.org/user/repo.git\n",
         )
 
-        with patch("git_provider.run_git", return_value=mock_result):
+        with patch("core.git_provider.run_git", return_value=mock_result):
             provider = detect_git_provider(temp_repo_dir)
 
         assert provider == "gitlab"
@@ -134,7 +140,7 @@ class TestDetectGitProviderHTTPS:
             stdout="http://github.com/user/repo.git\n",
         )
 
-        with patch("git_provider.run_git", return_value=mock_result):
+        with patch("core.git_provider.run_git", return_value=mock_result):
             provider = detect_git_provider(temp_repo_dir)
 
         assert provider == "github"
@@ -146,7 +152,7 @@ class TestDetectGitProviderHTTPS:
             stdout="https://gitlab.com/user/repo\n",
         )
 
-        with patch("git_provider.run_git", return_value=mock_result):
+        with patch("core.git_provider.run_git", return_value=mock_result):
             provider = detect_git_provider(temp_repo_dir)
 
         assert provider == "gitlab"
@@ -158,7 +164,7 @@ class TestDetectGitProviderHTTPS:
             stdout="https://gitlab.example.com:8443/user/repo.git\n",
         )
 
-        with patch("git_provider.run_git", return_value=mock_result):
+        with patch("core.git_provider.run_git", return_value=mock_result):
             provider = detect_git_provider(temp_repo_dir)
 
         assert provider == "gitlab"
@@ -175,7 +181,7 @@ class TestDetectGitProviderEdgeCases:
             stderr="fatal: No such remote 'origin'",
         )
 
-        with patch("git_provider.run_git", return_value=mock_result):
+        with patch("core.git_provider.run_git", return_value=mock_result):
             provider = detect_git_provider(temp_repo_dir)
 
         assert provider == "unknown"
@@ -187,7 +193,7 @@ class TestDetectGitProviderEdgeCases:
             stdout="   \n",
         )
 
-        with patch("git_provider.run_git", return_value=mock_result):
+        with patch("core.git_provider.run_git", return_value=mock_result):
             provider = detect_git_provider(temp_repo_dir)
 
         assert provider == "unknown"
@@ -199,7 +205,7 @@ class TestDetectGitProviderEdgeCases:
             stdout="malformed-url-without-colon\n",
         )
 
-        with patch("git_provider.run_git", return_value=mock_result):
+        with patch("core.git_provider.run_git", return_value=mock_result):
             provider = detect_git_provider(temp_repo_dir)
 
         assert provider == "unknown"
@@ -211,7 +217,7 @@ class TestDetectGitProviderEdgeCases:
             stdout="https://malformed\n",
         )
 
-        with patch("git_provider.run_git", return_value=mock_result):
+        with patch("core.git_provider.run_git", return_value=mock_result):
             provider = detect_git_provider(temp_repo_dir)
 
         assert provider == "unknown"
@@ -223,21 +229,21 @@ class TestDetectGitProviderEdgeCases:
             stdout="git@bitbucket.org:user/repo.git\n",
         )
 
-        with patch("git_provider.run_git", return_value=mock_result):
+        with patch("core.git_provider.run_git", return_value=mock_result):
             provider = detect_git_provider(temp_repo_dir)
 
         assert provider == "unknown"
 
     def test_subprocess_exception(self, temp_repo_dir):
         """Test handling of subprocess exceptions."""
-        with patch("git_provider.run_git", side_effect=subprocess.SubprocessError("Failed")):
+        with patch("core.git_provider.run_git", side_effect=subprocess.SubprocessError("Failed")):
             provider = detect_git_provider(temp_repo_dir)
 
         assert provider == "unknown"
 
     def test_generic_exception(self, temp_repo_dir):
         """Test handling of generic exceptions."""
-        with patch("git_provider.run_git", side_effect=Exception("Unexpected error")):
+        with patch("core.git_provider.run_git", side_effect=Exception("Unexpected error")):
             provider = detect_git_provider(temp_repo_dir)
 
         assert provider == "unknown"
@@ -250,7 +256,7 @@ class TestDetectGitProviderEdgeCases:
             stderr="Command timed out after 5 seconds",
         )
 
-        with patch("git_provider.run_git", return_value=mock_result):
+        with patch("core.git_provider.run_git", return_value=mock_result):
             provider = detect_git_provider(temp_repo_dir)
 
         assert provider == "unknown"
@@ -266,7 +272,7 @@ class TestDetectGitProviderPathTypes:
             stdout="git@github.com:user/repo.git\n",
         )
 
-        with patch("git_provider.run_git", return_value=mock_result):
+        with patch("core.git_provider.run_git", return_value=mock_result):
             provider = detect_git_provider("/path/to/repo")
 
         assert provider == "github"
@@ -278,7 +284,7 @@ class TestDetectGitProviderPathTypes:
             stdout="git@gitlab.com:user/repo.git\n",
         )
 
-        with patch("git_provider.run_git", return_value=mock_result):
+        with patch("core.git_provider.run_git", return_value=mock_result):
             provider = detect_git_provider(Path("/path/to/repo"))
 
         assert provider == "gitlab"
@@ -357,7 +363,7 @@ class TestGitCommandIntegration:
         """Test that run_git is called with correct arguments."""
         mock_result = MagicMock(returncode=0, stdout="git@github.com:user/repo.git\n")
 
-        with patch("git_provider.run_git", return_value=mock_result) as mock_run_git:
+        with patch("core.git_provider.run_git", return_value=mock_result) as mock_run_git:
             detect_git_provider(temp_repo_dir)
 
             # Verify run_git was called with correct parameters
@@ -371,7 +377,7 @@ class TestGitCommandIntegration:
         """Test that the 5-second timeout is used."""
         mock_result = MagicMock(returncode=0, stdout="git@github.com:user/repo.git\n")
 
-        with patch("git_provider.run_git", return_value=mock_result) as mock_run_git:
+        with patch("core.git_provider.run_git", return_value=mock_result) as mock_run_git:
             detect_git_provider(temp_repo_dir)
 
             # Verify timeout parameter
