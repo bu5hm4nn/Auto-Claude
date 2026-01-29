@@ -180,6 +180,7 @@ async function checkHttpHealth(server: CustomMcpServer, startTime: number): Prom
 /**
  * Check Streamable HTTP server health by making a request with proper MCP Accept header.
  * Streamable HTTP servers (MCP spec 2025-03-26) support both JSON and SSE responses.
+ * Includes Mcp-Session-Id header when an active session exists for session continuity.
  */
 async function checkStreamableHttpHealth(server: CustomMcpServer, startTime: number): Promise<McpHealthCheckResult> {
   if (!server.url) {
@@ -199,6 +200,13 @@ async function checkStreamableHttpHealth(server: CustomMcpServer, startTime: num
     const headers: Record<string, string> = {
       'Accept': 'application/json, text/event-stream',
     };
+
+    // Inject session ID if an active session exists for this server
+    const sessionStore = getMcpSessionStore();
+    const sessionId = sessionStore.getSessionId(server.url);
+    if (sessionId) {
+      headers['Mcp-Session-Id'] = sessionId;
+    }
 
     // Add custom headers if configured
     if (server.headers) {
