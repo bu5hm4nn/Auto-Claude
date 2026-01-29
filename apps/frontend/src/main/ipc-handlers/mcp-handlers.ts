@@ -761,14 +761,28 @@ async function reinitializeStreamableHttpSession(
     clearTimeout(timeout);
 
     if (!response.ok) {
-      sessionStore.updateState(server.url, 'error', `Re-init failed: HTTP ${response.status}`);
+      const errorMsg = `Re-init failed: HTTP ${response.status}`;
+      sessionStore.updateState(server.url, 'error', errorMsg);
+
+      // Sync error state to backend (single source of truth)
+      syncSessionToBackend(server.url, null, 'error', errorMsg).catch((err) => {
+        appLog.debug(`Failed to sync re-init HTTP error to backend for ${server.id}:`, err);
+      });
+
       return { success: false, error: `HTTP ${response.status}` };
     }
 
     const data = await response.json();
 
     if (data.error) {
-      sessionStore.updateState(server.url, 'error', 'MCP protocol error during re-init');
+      const errorMsg = 'MCP protocol error during re-init';
+      sessionStore.updateState(server.url, 'error', errorMsg);
+
+      // Sync error state to backend (single source of truth)
+      syncSessionToBackend(server.url, null, 'error', errorMsg).catch((err) => {
+        appLog.debug(`Failed to sync re-init protocol error to backend for ${server.id}:`, err);
+      });
+
       return { success: false, error: 'MCP protocol error' };
     }
 
@@ -779,16 +793,34 @@ async function reinitializeStreamableHttpSession(
     if (newSessionId) {
       sessionStore.setSession(server.url, newSessionId, 'active');
       appLog.debug(`MCP session re-initialized for ${server.id} (new session established)`);
+
+      // Sync new active session to backend (single source of truth)
+      syncSessionToBackend(server.url, newSessionId, 'active').catch((err) => {
+        appLog.debug(`Failed to sync re-initialized session to backend for ${server.id}:`, err);
+      });
+
       return { success: true, sessionId: newSessionId };
     } else {
       // Server didn't return a session ID - still mark as active
       sessionStore.updateState(server.url, 'active');
       appLog.debug(`MCP re-initialized for ${server.id} (no session ID returned)`);
+
+      // Sync active state to backend (without session ID)
+      syncSessionToBackend(server.url, null, 'active').catch((err) => {
+        appLog.debug(`Failed to sync re-initialized state to backend for ${server.id}:`, err);
+      });
+
       return { success: true };
     }
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     sessionStore.updateState(server.url, 'error', errorMessage);
+
+    // Sync error state to backend (single source of truth)
+    syncSessionToBackend(server.url, null, 'error', errorMessage).catch((err) => {
+      appLog.debug(`Failed to sync re-init error state to backend for ${server.id}:`, err);
+    });
+
     return { success: false, error: errorMessage };
   }
 }
