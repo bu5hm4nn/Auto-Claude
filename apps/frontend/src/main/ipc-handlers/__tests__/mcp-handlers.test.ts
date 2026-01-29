@@ -1187,12 +1187,25 @@ describe('MCP Health Check Functions', () => {
   });
 
   describe('MCP Session Termination (coordinates with backend)', () => {
+    // Helper to create a complete mock session
+    const createMockSession = (
+      serverUrl: string,
+      sessionId: string | null,
+      state: string
+    ) => ({
+      serverUrl,
+      sessionId,
+      state,
+      establishedAt: new Date().toISOString(),
+      lastActivityAt: new Date().toISOString(),
+      requestCount: 5,
+      reinitializeCount: 0,
+    });
+
     it('fetches session ID from backend and sends HTTP DELETE with session ID header', async () => {
-      mockBackendIpc.getSession.mockReturnValue({
-        serverUrl: 'https://example.com/mcp/stream',
-        sessionId: 'terminate-session-123',
-        state: 'active',
-      });
+      mockBackendIpc.getSession.mockReturnValue(
+        createMockSession('https://example.com/mcp/stream', 'terminate-session-123', 'active')
+      );
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -1216,7 +1229,7 @@ describe('MCP Health Check Functions', () => {
     });
 
     it('returns failure when backend reports no session exists', async () => {
-      mockBackendIpc.getSession.mockReturnValue(undefined);
+      mockBackendIpc.getSession.mockReturnValue(null);
 
       const { terminateSession } = await importSessionFunctions();
 
@@ -1228,11 +1241,9 @@ describe('MCP Health Check Functions', () => {
     });
 
     it('clears session in backend when no session ID present', async () => {
-      mockBackendIpc.getSession.mockReturnValue({
-        serverUrl: 'https://example.com/mcp/stream',
-        sessionId: null,
-        state: 'active',
-      });
+      mockBackendIpc.getSession.mockReturnValue(
+        createMockSession('https://example.com/mcp/stream', null, 'active')
+      );
 
       const { terminateSession } = await importSessionFunctions();
 
@@ -1244,11 +1255,9 @@ describe('MCP Health Check Functions', () => {
     });
 
     it('syncs terminating state to backend before sending DELETE', async () => {
-      mockBackendIpc.getSession.mockReturnValue({
-        serverUrl: 'https://example.com/mcp/stream',
-        sessionId: 'session-456',
-        state: 'active',
-      });
+      mockBackendIpc.getSession.mockReturnValue(
+        createMockSession('https://example.com/mcp/stream', 'session-456', 'active')
+      );
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -1266,11 +1275,9 @@ describe('MCP Health Check Functions', () => {
     });
 
     it('treats HTTP 404 as successful termination (session already expired)', async () => {
-      mockBackendIpc.getSession.mockReturnValue({
-        serverUrl: 'https://example.com/mcp/stream',
-        sessionId: 'expired-session',
-        state: 'active',
-      });
+      mockBackendIpc.getSession.mockReturnValue(
+        createMockSession('https://example.com/mcp/stream', 'expired-session', 'active')
+      );
 
       mockFetch.mockResolvedValueOnce({
         ok: false,
@@ -1287,11 +1294,9 @@ describe('MCP Health Check Functions', () => {
     });
 
     it('notifies backend of termination completion after DELETE', async () => {
-      mockBackendIpc.getSession.mockReturnValue({
-        serverUrl: 'https://example.com/mcp/stream',
-        sessionId: 'session-xyz',
-        state: 'active',
-      });
+      mockBackendIpc.getSession.mockReturnValue(
+        createMockSession('https://example.com/mcp/stream', 'session-xyz', 'active')
+      );
 
       mockFetch.mockResolvedValueOnce({
         ok: true,

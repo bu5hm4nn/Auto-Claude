@@ -193,12 +193,27 @@ async function executeBackendSessionIpc<T>(
 }
 
 /**
+ * Raw backend session format with snake_case keys.
+ * This is what the Python backend actually returns.
+ */
+interface BackendSession {
+  server_url: string;
+  session_id: string | null;
+  state: string;
+  established_at: string | null;
+  last_activity_at: string | null;
+  request_count: number;
+  reinitialize_count: number;
+  last_error?: string;
+}
+
+/**
  * Backend response for session set operation.
  */
 interface BackendSessionSetResponse {
   success: boolean;
   message: string;
-  session: McpSession | null;
+  session: BackendSession | null;
 }
 
 /**
@@ -207,7 +222,7 @@ interface BackendSessionSetResponse {
 interface BackendSessionGetResponse {
   success: boolean;
   message: string;
-  session: McpSession | null;
+  session: BackendSession | null;
 }
 
 /**
@@ -216,7 +231,7 @@ interface BackendSessionGetResponse {
 interface BackendSessionGetAllResponse {
   success: boolean;
   message: string;
-  sessions: McpSession[];
+  sessions: BackendSession[];
 }
 
 /**
@@ -460,16 +475,16 @@ export async function getSessionStatusFromBackend(
  * Convert backend session object (snake_case) to frontend format (camelCase).
  * The backend uses Python naming conventions, while frontend uses JavaScript conventions.
  */
-function convertBackendSession(backendSession: Record<string, unknown>): McpSession {
+function convertBackendSession(backendSession: BackendSession): McpSession {
   return {
-    serverUrl: (backendSession.server_url as string) || '',
-    sessionId: (backendSession.session_id as string | null) ?? null,
+    serverUrl: backendSession.server_url || '',
+    sessionId: backendSession.session_id ?? null,
     state: (backendSession.state as McpSessionState) || 'disconnected',
-    establishedAt: (backendSession.established_at as string | null) ?? null,
-    lastActivityAt: (backendSession.last_activity_at as string | null) ?? null,
-    requestCount: (backendSession.request_count as number) || 0,
-    reinitializeCount: (backendSession.reinitialize_count as number) || 0,
-    lastError: backendSession.last_error as string | undefined,
+    establishedAt: backendSession.established_at ?? null,
+    lastActivityAt: backendSession.last_activity_at ?? null,
+    requestCount: backendSession.request_count || 0,
+    reinitializeCount: backendSession.reinitialize_count || 0,
+    lastError: backendSession.last_error,
   };
 }
 
