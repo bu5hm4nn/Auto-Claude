@@ -1460,6 +1460,11 @@ async function testCommandConnection(server: CustomMcpServer, startTime: number)
  * Terminate a Streamable HTTP session by sending HTTP DELETE with Mcp-Session-Id header.
  * Per MCP spec 2025-03-26: clients SHOULD send HTTP DELETE to explicitly terminate sessions.
  *
+ * This function coordinates with the backend MCPSessionManager:
+ * 1. Gets session ID from backend (single source of truth)
+ * 2. Sends HTTP DELETE to the server
+ * 3. Notifies backend of termination result
+ *
  * @param serverUrl - The server URL with an active session
  * @param headers - Optional custom headers to include in the request
  * @returns Result indicating success/failure of termination
@@ -1470,26 +1475,36 @@ async function terminateMcpSession(
 ): Promise<{ success: boolean; message: string; statusCode?: number }> {
   const sessionStore = getMcpSessionStore();
 
-  // Check if there's an active session to terminate
-  const session = sessionStore.getSession(serverUrl);
-  if (!session) {
+  // Get session ID from backend (single source of truth) and mark as terminating
+  const backendResult = await terminateSessionInBackend(serverUrl);
+
+  if (!backendResult.success) {
+    // Backend couldn't initiate termination - check if we have a local session to clean up
+    const localSession = sessionStore.getSession(serverUrl);
+    if (localSession) {
+      sessionStore.clearSession(serverUrl);
+    }
     return {
       success: false,
-      message: 'No session exists for this server',
+      message: backendResult.message || 'No session exists for this server',
     };
   }
 
-  const sessionId = session.sessionId;
+  const sessionId = backendResult.sessionId;
   if (!sessionId) {
-    // No session ID - just clear the store entry
+    // No session ID - backend has already cleared the session
     sessionStore.clearSession(serverUrl);
+
+    // Notify backend termination is complete (no HTTP request needed)
+    await notifyTerminationComplete(serverUrl, true);
+
     return {
       success: true,
       message: 'Session cleared (no session ID to terminate)',
     };
   }
 
-  // Mark session as terminating
+  // Also mark session as terminating in local store (will be removed in phase 6)
   sessionStore.updateState(serverUrl, 'terminating');
 
   try {
@@ -1514,8 +1529,11 @@ async function terminateMcpSession(
 
     clearTimeout(timeout);
 
-    // Mark termination complete in store
+    // Mark termination complete in local store (will be removed in phase 6)
     sessionStore.terminationComplete(serverUrl, response.ok, response.status);
+
+    // Notify backend of termination result
+    await notifyTerminationComplete(serverUrl, response.ok || response.status === 204 || response.status === 404, response.status);
 
     if (response.ok || response.status === 204) {
       // 200 or 204 indicates successful termination
@@ -1546,6 +1564,9 @@ async function terminateMcpSession(
 
     // Still clear the session even if DELETE failed (best effort cleanup)
     sessionStore.terminationComplete(serverUrl, false);
+
+    // Notify backend of termination failure
+    await notifyTerminationComplete(serverUrl, false);
 
     return {
       success: false,
