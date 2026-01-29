@@ -195,12 +195,11 @@ export class McpSessionStore {
       ...existing,
       state,
       lastActivityAt: new Date().toISOString(),
+      // Clear stale error when transitioning to non-error states
+      lastError: state === 'error' ? (error ?? existing.lastError) : undefined,
     };
 
-    if (error) {
-      updated.lastError = error;
-    }
-
+    // Track re-initialization attempts
     if (state === 'reconnecting') {
       updated.reinitializeCount = existing.reinitializeCount + 1;
     }

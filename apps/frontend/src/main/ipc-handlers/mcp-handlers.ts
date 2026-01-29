@@ -361,7 +361,8 @@ async function reinitializeStreamableHttpSession(
     }
 
     // Capture new Mcp-Session-Id from response headers
-    const newSessionId = response.headers.get('mcp-session-id') || response.headers.get('Mcp-Session-Id');
+    // Headers.get() is case-insensitive per HTTP spec
+    const newSessionId = response.headers.get('Mcp-Session-Id');
 
     if (newSessionId) {
       sessionStore.setSession(server.url, newSessionId, 'active');
@@ -701,9 +702,9 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
       };
     }
 
-    // Capture Mcp-Session-Id from response headers (case-insensitive per HTTP spec)
-    // The header name is 'Mcp-Session-Id' but fetch normalizes headers to lowercase
-    const sessionId = response.headers.get('mcp-session-id') || response.headers.get('Mcp-Session-Id');
+    // Capture Mcp-Session-Id from response headers
+    // Headers.get() is case-insensitive per HTTP spec
+    const sessionId = response.headers.get('Mcp-Session-Id');
 
     // Store session ID if present - this establishes an active session
     if (sessionId) {
@@ -1104,19 +1105,12 @@ export function registerMcpHandlers(): void {
   });
 
   // Terminate MCP session (HTTP DELETE with Mcp-Session-Id)
+  // Note: terminateMcpSession handles all errors internally and returns success/failure
   ipcMain.handle(
     IPC_CHANNELS.MCP_SESSION_TERMINATE,
     async (_event, serverUrl: string, headers?: Record<string, string>) => {
-      try {
-        const result = await terminateMcpSession(serverUrl, headers);
-        return { success: result.success, data: result };
-      } catch (error) {
-        appLog.error('MCP session termination error:', error);
-        return {
-          success: false,
-          error: error instanceof Error ? error.message : 'Session termination failed',
-        };
-      }
+      const result = await terminateMcpSession(serverUrl, headers);
+      return { success: result.success, data: result };
     }
   );
 
