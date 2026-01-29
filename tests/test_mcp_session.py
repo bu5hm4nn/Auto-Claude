@@ -122,6 +122,55 @@ class TestMCPSession:
         result = session.to_dict()
         assert result["session_id_masked"] == "<none>"
 
+    def test_copy_creates_independent_session(self):
+        """copy() creates an independent session with same values."""
+        from core.mcp_session import MCPSession, MCPSessionState
+
+        original = MCPSession("https://example.com/mcp")
+        original.session_id = "test-session-12345"
+        original.state = MCPSessionState.ACTIVE
+        original.established_at = "2024-01-01T00:00:00Z"
+        original.last_activity_at = "2024-01-01T01:00:00Z"
+        original.request_count = 5
+        original.reinitialize_count = 2
+        original.last_error = "Connection lost"
+
+        copied = original.copy()
+
+        # Verify values are copied
+        assert copied.server_url == original.server_url
+        assert copied.session_id == original.session_id
+        assert copied.state == original.state
+        assert copied.established_at == original.established_at
+        assert copied.last_activity_at == original.last_activity_at
+        assert copied.request_count == original.request_count
+        assert copied.reinitialize_count == original.reinitialize_count
+        assert copied.last_error == original.last_error
+
+        # Verify it's a different object
+        assert copied is not original
+
+    def test_copy_is_independent_from_original(self):
+        """Modifying copy does not affect original."""
+        from core.mcp_session import MCPSession, MCPSessionState
+
+        original = MCPSession("https://example.com/mcp")
+        original.session_id = "original-id"
+        original.state = MCPSessionState.ACTIVE
+        original.request_count = 5
+
+        copied = original.copy()
+
+        # Modify the copy
+        copied.session_id = "modified-id"
+        copied.state = MCPSessionState.ERROR
+        copied.request_count = 100
+
+        # Original should be unchanged
+        assert original.session_id == "original-id"
+        assert original.state == MCPSessionState.ACTIVE
+        assert original.request_count == 5
+
 
 class TestMCPSessionTerminateResult:
     """Tests for MCPSessionTerminateResult class."""
@@ -174,6 +223,29 @@ class TestMCPSessionManager:
         manager = MCPSessionManager()
         result = manager.get_session("https://unknown.com/mcp")
         assert result is None
+
+    def test_get_session_returns_independent_copy(self):
+        """get_session() returns a copy that doesn't affect manager state."""
+        from core.mcp_session import MCPSessionManager, MCPSessionState
+
+        manager = MCPSessionManager()
+        manager.set_session(
+            "https://example.com/mcp",
+            "session-123",
+            MCPSessionState.ACTIVE,
+        )
+
+        # Get session and modify it
+        session = manager.get_session("https://example.com/mcp")
+        session.session_id = "modified-id"
+        session.state = MCPSessionState.ERROR
+        session.request_count = 999
+
+        # Get fresh session - should have original values
+        fresh_session = manager.get_session("https://example.com/mcp")
+        assert fresh_session.session_id == "session-123"
+        assert fresh_session.state == MCPSessionState.ACTIVE
+        assert fresh_session.request_count == 0
 
     def test_set_session_creates_new_session(self):
         """Creates new session when none exists."""
@@ -235,11 +307,11 @@ class TestMCPSessionManager:
         session = manager.get_session("https://example.com/mcp")
         assert session.reinitialize_count == 1
 
-    def test_set_session_preserves_request_count_on_update(self):
-        """Request count is preserved when updating existing session.
+    def test_set_session_resets_request_count_on_new_session_id(self):
+        """Request count is reset when session ID changes.
 
-        Note: Due to implementation, request_count is only reset for NEW sessions,
-        not when updating an existing session with a new session ID.
+        When a new session ID is provided for an ACTIVE session,
+        request_count is reset to 0 since it's a fresh session.
         """
         from core.mcp_session import MCPSessionManager, MCPSessionState
 
@@ -255,7 +327,7 @@ class TestMCPSessionManager:
         session = manager.get_session("https://example.com/mcp")
         assert session.request_count == 2
 
-        # Updating with new session ID preserves request count
+        # Updating with new session ID resets request count
         manager.set_session(
             "https://example.com/mcp",
             "session-new",
@@ -263,7 +335,7 @@ class TestMCPSessionManager:
         )
 
         session = manager.get_session("https://example.com/mcp")
-        assert session.request_count == 2  # Count preserved
+        assert session.request_count == 0  # Count reset for new session
 
     def test_new_session_starts_with_zero_request_count(self):
         """New sessions start with request count of zero."""
@@ -316,8 +388,8 @@ class TestMCPSessionManager:
         result = manager.get_session_id("https://unknown.com/mcp")
         assert result is None
 
-    def test_get_all_sessions_returns_copy(self):
-        """Returns a copy of all sessions."""
+    def test_get_all_sessions_returns_copy_of_list(self):
+        """Returns a copy of the sessions list."""
         from core.mcp_session import MCPSessionManager, MCPSessionState
 
         manager = MCPSessionManager()
@@ -327,9 +399,26 @@ class TestMCPSessionManager:
         sessions = manager.get_all_sessions()
         assert len(sessions) == 2
 
-        # Verify it's a copy (modifying doesn't affect manager)
+        # Verify it's a copy (modifying list doesn't affect manager)
         sessions.clear()
         assert len(manager.get_all_sessions()) == 2
+
+    def test_get_all_sessions_returns_independent_session_copies(self):
+        """Returned sessions are independent copies that don't affect manager state."""
+        from core.mcp_session import MCPSessionManager, MCPSessionState
+
+        manager = MCPSessionManager()
+        manager.set_session("https://server1.com/mcp", "s1", MCPSessionState.ACTIVE)
+
+        # Get sessions and modify them
+        sessions = manager.get_all_sessions()
+        sessions[0].session_id = "modified-id"
+        sessions[0].state = MCPSessionState.ERROR
+
+        # Fresh fetch should have original values
+        fresh_sessions = manager.get_all_sessions()
+        assert fresh_sessions[0].session_id == "s1"
+        assert fresh_sessions[0].state == MCPSessionState.ACTIVE
 
     def test_update_state_changes_state(self):
         """Updates session state without changing session ID."""
@@ -651,6 +740,31 @@ class TestMCPSessionManagerListeners:
         manager.clear_all_sessions()
 
         assert len(notifications) == 2
+
+    def test_listener_receives_copy_not_internal_reference(self):
+        """Listeners receive a copy of the session, not the internal reference."""
+        from core.mcp_session import MCPSessionManager, MCPSessionState
+
+        manager = MCPSessionManager()
+        received_sessions = []
+
+        def listener(server_url, session):
+            # Attempt to modify the session
+            session.session_id = "listener-modified-id"
+            session.state = MCPSessionState.ERROR
+            received_sessions.append(session)
+
+        manager.add_listener(listener)
+        manager.set_session("https://example.com/mcp", "original-id", MCPSessionState.ACTIVE)
+
+        # Verify listener received the session
+        assert len(received_sessions) == 1
+        assert received_sessions[0].session_id == "listener-modified-id"  # Listener modified it
+
+        # Get fresh session from manager - should have original values
+        session = manager.get_session("https://example.com/mcp")
+        assert session.session_id == "original-id"
+        assert session.state == MCPSessionState.ACTIVE
 
 
 class TestMCPSessionManagerThreadSafety:

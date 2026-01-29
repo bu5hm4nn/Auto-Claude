@@ -59,6 +59,27 @@ class MCPSession:
         self.reinitialize_count = 0
         self.last_error: str | None = None
 
+    def copy(self) -> "MCPSession":
+        """
+        Create a shallow copy of this session.
+
+        Returns a new MCPSession with the same attribute values.
+        This is used to return safe copies from MCPSessionManager
+        that won't affect internal state if modified externally.
+
+        Returns:
+            A new MCPSession instance with copied attributes
+        """
+        session = MCPSession(self.server_url)
+        session.session_id = self.session_id
+        session.state = self.state
+        session.established_at = self.established_at
+        session.last_activity_at = self.last_activity_at
+        session.request_count = self.request_count
+        session.reinitialize_count = self.reinitialize_count
+        session.last_error = self.last_error
+        return session
+
     def to_dict(self) -> dict:
         """Convert session to dictionary for serialization."""
         return {
@@ -162,24 +183,31 @@ class MCPSessionManager:
         """
         Get session for a server URL.
 
+        Returns a copy of the session to ensure thread safety.
+        Modifications to the returned session will not affect the manager's state.
+
         Args:
             server_url: The URL of the MCP server
 
         Returns:
-            MCPSession if one exists for the URL, None otherwise
+            MCPSession copy if one exists for the URL, None otherwise
         """
         with self._lock:
-            return self._sessions.get(server_url)
+            session = self._sessions.get(server_url)
+            return session.copy() if session else None
 
     def get_all_sessions(self) -> list[MCPSession]:
         """
         Get all sessions.
 
+        Returns copies of all sessions to ensure thread safety.
+        Modifications to the returned sessions will not affect the manager's state.
+
         Returns:
-            List of all MCPSession objects (copy, safe to iterate)
+            List of MCPSession copies (safe to iterate and modify)
         """
         with self._lock:
-            return list(self._sessions.values())
+            return [session.copy() for session in self._sessions.values()]
 
     def get_session_id(self, server_url: str) -> str | None:
         """
@@ -219,6 +247,9 @@ class MCPSessionManager:
             existing = self._sessions.get(server_url)
             now = _now_iso()
 
+            # Store old session ID BEFORE updating to detect new sessions
+            old_session_id = existing.session_id if existing else None
+
             if existing:
                 session = existing
                 session.session_id = session_id
@@ -235,11 +266,11 @@ class MCPSessionManager:
             if state == MCPSessionState.RECONNECTING:
                 session.reinitialize_count += 1
 
-            # Reset counts on new session
+            # Reset counts on new session (compare against old ID, not current)
             if (
                 state == MCPSessionState.ACTIVE
                 and session_id
-                and session_id != (existing.session_id if existing else None)
+                and session_id != old_session_id
             ):
                 session.established_at = now
                 session.request_count = 0
@@ -473,6 +504,9 @@ class MCPSessionManager:
         """
         Notify all listeners of session state change.
 
+        Passes a copy of the session to each listener to ensure thread safety.
+        Listeners cannot modify the manager's internal state through the session.
+
         Args:
             server_url: The URL of the MCP server
             session: The updated session
@@ -481,9 +515,13 @@ class MCPSessionManager:
         with self._lock:
             listeners = self._listeners.copy()
 
+        # Create a copy of the session to pass to listeners
+        # This prevents listeners from modifying internal state
+        session_copy = session.copy()
+
         for listener in listeners:
             try:
-                listener(server_url, session)
+                listener(server_url, session_copy)
             except Exception as e:
                 logger.error("MCP session listener error: %s", e)
 
