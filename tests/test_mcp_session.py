@@ -91,7 +91,7 @@ class TestMCPSession:
         assert session.last_error is None
 
     def test_to_dict_serializes_session(self):
-        """Serializes session to dictionary with masked ID."""
+        """Serializes session to dictionary with both session_id and masked ID."""
         from core.mcp_session import MCPSession, MCPSessionState
 
         session = MCPSession("https://example.com/mcp")
@@ -106,7 +106,8 @@ class TestMCPSession:
         result = session.to_dict()
 
         assert result["server_url"] == "https://example.com/mcp"
-        assert result["session_id_masked"] == "test****"
+        assert result["session_id"] == "test-session-12345"  # Actual ID for IPC
+        assert result["session_id_masked"] == "test****"  # Masked ID for logging
         assert result["state"] == "active"
         assert result["established_at"] == "2024-01-01T00:00:00Z"
         assert result["last_activity_at"] == "2024-01-01T01:00:00Z"
@@ -120,7 +121,8 @@ class TestMCPSession:
 
         session = MCPSession("https://example.com/mcp")
         result = session.to_dict()
-        assert result["session_id_masked"] == "<none>"
+        assert result["session_id"] is None  # Actual ID is None
+        assert result["session_id_masked"] == "<none>"  # Masked representation
 
     def test_copy_creates_independent_session(self):
         """copy() creates an independent session with same values."""
@@ -941,7 +943,8 @@ class TestHandleMCPSessionSet:
         assert result["session"] is not None
         assert result["session"]["server_url"] == "https://example.com/mcp"
         assert result["session"]["state"] == "active"
-        assert result["session"]["session_id_masked"] == "test****"
+        assert result["session"]["session_id"] == "test-session-12345"  # Actual ID for IPC
+        assert result["session"]["session_id_masked"] == "test****"  # Masked ID for logging
 
         # Verify session was actually stored
         manager = get_mcp_session_manager()
@@ -1066,7 +1069,8 @@ class TestHandleMCPSessionGet:
         assert result["message"] == "Session retrieved"
         assert result["session"] is not None
         assert result["session"]["server_url"] == "https://example.com/mcp"
-        assert result["session"]["session_id_masked"] == "test****"
+        assert result["session"]["session_id"] == "test-session-12345"  # Actual ID for IPC
+        assert result["session"]["session_id_masked"] == "test****"  # Masked ID for logging
         assert result["session"]["state"] == "active"
 
 

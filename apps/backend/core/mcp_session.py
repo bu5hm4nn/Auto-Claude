@@ -84,7 +84,8 @@ class MCPSession:
         """Convert session to dictionary for serialization."""
         return {
             "server_url": self.server_url,
-            "session_id_masked": mask_session_id(self.session_id),
+            "session_id": self.session_id,  # Actual session ID for IPC
+            "session_id_masked": mask_session_id(self.session_id),  # For logging/display
             "state": self.state.value,
             "established_at": self.established_at,
             "last_activity_at": self.last_activity_at,
