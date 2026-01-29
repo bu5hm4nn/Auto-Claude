@@ -314,6 +314,7 @@ class MCPSessionManager:
                 self._notify_listeners(server_url, session)
                 return
 
+            old_state = existing.state
             existing.state = state
             existing.last_activity_at = _now_iso()
 
@@ -324,6 +325,14 @@ class MCPSessionManager:
                 existing.reinitialize_count += 1
 
             self._notify_listeners(server_url, existing)
+
+            # Log state transition
+            logger.debug(
+                "MCP session state transition: %s (%s -> %s)",
+                server_url,
+                old_state.value,
+                state.value,
+            )
 
     def increment_request_count(self, server_url: str) -> None:
         """
@@ -494,9 +503,13 @@ class MCPSessionManager:
             self._listeners.append(listener)
 
         def unsubscribe() -> None:
+            """Remove listener - safe to call multiple times (idempotent)."""
             with self._lock:
-                if listener in self._listeners:
+                try:
                     self._listeners.remove(listener)
+                except ValueError:
+                    # Listener already removed - this is fine (idempotent)
+                    pass
 
         return unsubscribe
 

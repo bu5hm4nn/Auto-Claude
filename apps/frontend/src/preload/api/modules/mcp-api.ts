@@ -20,12 +20,12 @@ export interface McpAPI {
   checkMcpHealth: (server: CustomMcpServer) => Promise<IPCResult<McpHealthCheckResult>>;
   /** Full MCP connection test */
   testMcpConnection: (server: CustomMcpServer) => Promise<IPCResult<McpTestConnectionResult>>;
-  /** Get session status for a terminal */
-  getSessionStatus: (terminalId: string) => Promise<IPCResult<McpSessionStatus | null>>;
+  /** Get session status for a server URL */
+  getSessionStatus: (serverUrl: string) => Promise<IPCResult<McpSessionStatus | null>>;
   /** Get all active MCP sessions */
   getAllSessions: () => Promise<IPCResult<McpSessionStatus[]>>;
-  /** Terminate MCP session for a terminal */
-  terminateSession: (terminalId: string) => Promise<IPCResult<McpSessionTerminateResult>>;
+  /** Terminate MCP session for a server URL */
+  terminateSession: (serverUrl: string) => Promise<IPCResult<McpSessionTerminateResult>>;
 }
 
 export function createMcpAPI(): McpAPI {
@@ -36,13 +36,13 @@ export function createMcpAPI(): McpAPI {
     testMcpConnection: (server: CustomMcpServer) =>
       ipcRenderer.invoke(IPC_CHANNELS.MCP_TEST_CONNECTION, server),
 
-    getSessionStatus: (terminalId: string) =>
-      ipcRenderer.invoke(IPC_CHANNELS.MCP_SESSION_GET_STATUS, terminalId),
+    getSessionStatus: (serverUrl: string) =>
+      ipcRenderer.invoke(IPC_CHANNELS.MCP_SESSION_GET_STATUS, serverUrl),
 
     getAllSessions: () =>
       ipcRenderer.invoke(IPC_CHANNELS.MCP_SESSION_GET_ALL),
 
-    terminateSession: (terminalId: string) =>
-      ipcRenderer.invoke(IPC_CHANNELS.MCP_SESSION_TERMINATE, terminalId),
+    terminateSession: (serverUrl: string) =>
+      ipcRenderer.invoke(IPC_CHANNELS.MCP_SESSION_TERMINATE, serverUrl),
   };
 }
