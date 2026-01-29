@@ -256,3 +256,74 @@ def handle_mcp_session_get_all(data: dict[str, Any]) -> dict[str, Any]:
             "message": f"Failed to get sessions: {str(e)}",
             "sessions": [],
         }
+
+
+def handle_mcp_session_terminate(data: dict[str, Any]) -> dict[str, Any]:
+    """
+    Handle mcp:session:terminate message from frontend.
+
+    Initiates session termination for a specific server URL. This marks the
+    session as TERMINATING in the backend MCPSessionManager. The actual HTTP
+    DELETE request to the server should be performed by the caller after
+    receiving a successful response.
+
+    Args:
+        data: Message data containing:
+            - server_url (str): The URL of the MCP server
+
+    Returns:
+        Response dict with:
+            - success (bool): Whether the termination was initiated
+            - message (str): Description of the result
+            - result (dict | None): Termination result data
+
+    Example:
+        >>> handle_mcp_session_terminate({
+        ...     "server_url": "http://localhost:3000/mcp"
+        ... })
+        {'success': True, 'message': 'Session termination initiated', 'result': {...}}
+    """
+    # Validate required fields
+    server_url = data.get("server_url")
+    if not server_url:
+        logger.warning("mcp:session:terminate missing server_url")
+        return {
+            "success": False,
+            "message": "Missing required field: server_url",
+            "result": None,
+        }
+
+    # Get the session manager singleton
+    manager = get_mcp_session_manager()
+
+    try:
+        result = manager.terminate_session(server_url)
+        result_dict = result.to_dict()
+
+        if result.success:
+            logger.debug("mcp:session:terminate success for %s", server_url)
+        else:
+            logger.debug(
+                "mcp:session:terminate failed for %s: %s",
+                server_url,
+                result.message,
+            )
+
+        return {
+            "success": result.success,
+            "message": result.message,
+            "result": result_dict,
+        }
+
+    except Exception as e:
+        logger.error(
+            "mcp:session:terminate error for %s: %s",
+            server_url,
+            str(e),
+            exc_info=True,
+        )
+        return {
+            "success": False,
+            "message": f"Failed to terminate session: {str(e)}",
+            "result": None,
+        }
