@@ -439,6 +439,8 @@ export interface McpTestConnectionResult {
   tools?: string[];
   /** Response time in milliseconds */
   responseTime?: number;
+  /** Session ID from Mcp-Session-Id header (Streamable HTTP only) */
+  sessionId?: string;
 }
 
 // ============================================
