@@ -327,3 +327,140 @@ def handle_mcp_session_terminate(data: dict[str, Any]) -> dict[str, Any]:
             "message": f"Failed to terminate session: {str(e)}",
             "result": None,
         }
+
+
+# Handler registry for IPC message routing
+MCP_SESSION_HANDLERS = {
+    "mcp:session:set": handle_mcp_session_set,
+    "mcp:session:get": handle_mcp_session_get,
+    "mcp:session:getAll": handle_mcp_session_get_all,
+    "mcp:session:terminate": handle_mcp_session_terminate,
+}
+
+
+def dispatch_mcp_session_message(message: dict[str, Any]) -> dict[str, Any]:
+    """
+    Dispatch an MCP session IPC message to the appropriate handler.
+
+    This is the main entry point for subprocess IPC communication with the
+    frontend. The frontend calls this module as a subprocess and passes
+    JSON messages for processing.
+
+    Args:
+        message: IPC message dict containing:
+            - type (str): Message type (e.g., "mcp:session:set")
+            - ...additional fields depending on message type
+
+    Returns:
+        Response dict from the appropriate handler, or an error response
+        if the message type is unknown.
+
+    Example:
+        >>> dispatch_mcp_session_message({
+        ...     "type": "mcp:session:get",
+        ...     "server_url": "http://localhost:3000/mcp"
+        ... })
+        {'success': True, 'message': 'Session retrieved', 'session': {...}}
+    """
+    message_type = message.get("type")
+
+    if not message_type:
+        return {
+            "success": False,
+            "message": "Missing required field: type",
+            "error": "MISSING_TYPE",
+        }
+
+    handler = MCP_SESSION_HANDLERS.get(message_type)
+
+    if not handler:
+        valid_types = list(MCP_SESSION_HANDLERS.keys())
+        return {
+            "success": False,
+            "message": f"Unknown message type: {message_type}. Valid types: {valid_types}",
+            "error": "UNKNOWN_TYPE",
+        }
+
+    # Extract data (everything except 'type')
+    data = {k: v for k, v in message.items() if k != "type"}
+
+    try:
+        return handler(data)
+    except Exception as e:
+        logger.error(
+            "Error dispatching MCP session message %s: %s",
+            message_type,
+            str(e),
+            exc_info=True,
+        )
+        return {
+            "success": False,
+            "message": f"Handler error: {str(e)}",
+            "error": "HANDLER_ERROR",
+        }
+
+
+if __name__ == "__main__":
+    """
+    CLI entry point for subprocess IPC communication.
+
+    Usage:
+        # Single message via argument
+        python -m services.mcp_session_ipc '{"type": "mcp:session:get", "server_url": "..."}'
+
+        # Interactive mode via stdin (reads one JSON message per line)
+        echo '{"type": "mcp:session:getAll"}' | python -m services.mcp_session_ipc
+
+    Output:
+        JSON response on stdout
+    """
+    import json
+    import sys
+
+    # Set up basic logging for CLI mode
+    logging.basicConfig(
+        level=logging.WARNING,
+        format="%(levelname)s: %(message)s",
+        stream=sys.stderr,
+    )
+
+    # Check for message in command line args
+    if len(sys.argv) > 1:
+        try:
+            message = json.loads(sys.argv[1])
+            result = dispatch_mcp_session_message(message)
+            print(json.dumps(result))
+            sys.exit(0 if result.get("success") else 1)
+        except json.JSONDecodeError as e:
+            error_response = {
+                "success": False,
+                "message": f"Invalid JSON: {str(e)}",
+                "error": "INVALID_JSON",
+            }
+            print(json.dumps(error_response))
+            sys.exit(1)
+    else:
+        # Read from stdin (non-interactive single message mode)
+        try:
+            line = sys.stdin.readline().strip()
+            if not line:
+                error_response = {
+                    "success": False,
+                    "message": "No input received",
+                    "error": "NO_INPUT",
+                }
+                print(json.dumps(error_response))
+                sys.exit(1)
+
+            message = json.loads(line)
+            result = dispatch_mcp_session_message(message)
+            print(json.dumps(result))
+            sys.exit(0 if result.get("success") else 1)
+        except json.JSONDecodeError as e:
+            error_response = {
+                "success": False,
+                "message": f"Invalid JSON: {str(e)}",
+                "error": "INVALID_JSON",
+            }
+            print(json.dumps(error_response))
+            sys.exit(1)
