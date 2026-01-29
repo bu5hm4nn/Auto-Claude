@@ -181,8 +181,17 @@ async function checkHttpHealth(server: CustomMcpServer, startTime: number): Prom
  * Check Streamable HTTP server health by making a request with proper MCP Accept header.
  * Streamable HTTP servers (MCP spec 2025-03-26) support both JSON and SSE responses.
  * Includes Mcp-Session-Id header when an active session exists for session continuity.
+ *
+ * Handles session-related errors:
+ * - HTTP 400: Missing session - session ID required but not provided
+ * - HTTP 404: Expired session - session ID no longer valid
+ * In both cases, the stale session is cleared and re-initialization is triggered.
  */
-async function checkStreamableHttpHealth(server: CustomMcpServer, startTime: number): Promise<McpHealthCheckResult> {
+async function checkStreamableHttpHealth(
+  server: CustomMcpServer,
+  startTime: number,
+  isRetry: boolean = false
+): Promise<McpHealthCheckResult> {
   if (!server.url) {
     return {
       serverId: server.id,
@@ -191,6 +200,8 @@ async function checkStreamableHttpHealth(server: CustomMcpServer, startTime: num
       checkedAt: new Date().toISOString(),
     };
   }
+
+  const sessionStore = getMcpSessionStore();
 
   try {
     const controller = new AbortController();
@@ -202,7 +213,6 @@ async function checkStreamableHttpHealth(server: CustomMcpServer, startTime: num
     };
 
     // Inject session ID if an active session exists for this server
-    const sessionStore = getMcpSessionStore();
     const sessionId = sessionStore.getSessionId(server.url);
     if (sessionId) {
       headers['Mcp-Session-Id'] = sessionId;
@@ -231,6 +241,33 @@ async function checkStreamableHttpHealth(server: CustomMcpServer, startTime: num
     } else if (response.status === 401 || response.status === 403) {
       status = 'needs_auth';
       message = response.status === 401 ? 'Authentication required' : 'Access forbidden';
+    } else if ((response.status === 400 || response.status === 404) && !isRetry) {
+      // HTTP 400: Missing session - session ID required but not provided
+      // HTTP 404: Expired session - session ID no longer valid
+      // Clear stale session and attempt re-initialization
+      appLog.debug(
+        `MCP session error for ${server.id}: HTTP ${response.status} - ${response.status === 400 ? 'missing' : 'expired'} session, re-initializing`
+      );
+
+      sessionStore.clearSession(server.url);
+      sessionStore.updateState(server.url, 'reconnecting');
+
+      // Attempt to re-initialize the session
+      const reinitResult = await reinitializeStreamableHttpSession(server, startTime);
+      if (reinitResult.success) {
+        // Re-initialization succeeded, retry health check with new session
+        return checkStreamableHttpHealth(server, startTime, true);
+      }
+
+      // Re-initialization failed
+      return {
+        serverId: server.id,
+        status: 'unhealthy',
+        statusCode: response.status,
+        message: `Session ${response.status === 400 ? 'missing' : 'expired'}, re-initialization failed`,
+        responseTime: Date.now() - startTime,
+        checkedAt: new Date().toISOString(),
+      };
     } else {
       status = 'unhealthy';
       message = `HTTP ${response.status}: ${response.statusText}`;
@@ -255,6 +292,91 @@ async function checkStreamableHttpHealth(server: CustomMcpServer, startTime: num
       responseTime,
       checkedAt: new Date().toISOString(),
     };
+  }
+}
+
+/**
+ * Re-initialize a Streamable HTTP session after 400/404 errors.
+ * Sends a fresh initialize request without session ID to establish a new session.
+ */
+async function reinitializeStreamableHttpSession(
+  server: CustomMcpServer,
+  startTime: number
+): Promise<{ success: boolean; sessionId?: string; error?: string }> {
+  if (!server.url) {
+    return { success: false, error: 'No URL configured' };
+  }
+
+  const sessionStore = getMcpSessionStore();
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000); // 15 second timeout for initialization
+
+    // Fresh initialization request - no session ID
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json, text/event-stream',
+    };
+
+    // Add custom headers if configured
+    if (server.headers) {
+      Object.assign(headers, server.headers);
+    }
+
+    // Send MCP initialize request with Streamable HTTP protocol version
+    const initRequest = {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2025-03-26',
+        capabilities: {},
+        clientInfo: {
+          name: 'auto-claude-health-check',
+          version: '1.0.0',
+        },
+      },
+    };
+
+    const response = await fetch(server.url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(initRequest),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeout);
+
+    if (!response.ok) {
+      sessionStore.updateState(server.url, 'error', `Re-init failed: HTTP ${response.status}`);
+      return { success: false, error: `HTTP ${response.status}` };
+    }
+
+    const data = await response.json();
+
+    if (data.error) {
+      sessionStore.updateState(server.url, 'error', 'MCP protocol error during re-init');
+      return { success: false, error: 'MCP protocol error' };
+    }
+
+    // Capture new Mcp-Session-Id from response headers
+    const newSessionId = response.headers.get('mcp-session-id') || response.headers.get('Mcp-Session-Id');
+
+    if (newSessionId) {
+      sessionStore.setSession(server.url, newSessionId, 'active');
+      appLog.debug(`MCP session re-initialized for ${server.id} (new session established)`);
+      return { success: true, sessionId: newSessionId };
+    } else {
+      // Server didn't return a session ID - still mark as active
+      sessionStore.updateState(server.url, 'active');
+      appLog.debug(`MCP re-initialized for ${server.id} (no session ID returned)`);
+      return { success: true };
+    }
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    sessionStore.updateState(server.url, 'error', errorMessage);
+    return { success: false, error: errorMessage };
   }
 }
 
@@ -628,6 +750,48 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
         }
         // Increment request count for successful request
         sessionStore.incrementRequestCount(server.url);
+      } else if (toolsResponse.status === 400 || toolsResponse.status === 404) {
+        // HTTP 400: Missing session - session ID required but not provided
+        // HTTP 404: Expired session - session ID no longer valid
+        // This shouldn't happen right after initialization, but handle it gracefully
+        appLog.debug(
+          `MCP tools/list got ${toolsResponse.status} for ${server.id} - session may have expired immediately, clearing`
+        );
+        sessionStore.clearSession(server.url);
+        sessionStore.updateState(server.url, 'reconnecting');
+
+        // Re-initialize and retry tools/list once
+        const reinitResult = await reinitializeStreamableHttpSession(server, startTime);
+        if (reinitResult.success && reinitResult.sessionId) {
+          // Retry tools/list with new session
+          const retryController = new AbortController();
+          const retryTimeout = setTimeout(() => retryController.abort(), 10000);
+
+          const retryHeaders: Record<string, string> = { ...headers };
+          retryHeaders['Mcp-Session-Id'] = reinitResult.sessionId;
+
+          try {
+            const retryResponse = await fetch(server.url, {
+              method: 'POST',
+              headers: retryHeaders,
+              body: JSON.stringify(toolsRequest),
+              signal: retryController.signal,
+            });
+
+            clearTimeout(retryTimeout);
+
+            if (retryResponse.ok) {
+              const retryData = await retryResponse.json();
+              if (retryData.result?.tools) {
+                tools = retryData.result.tools.map((t: { name: string }) => t.name);
+              }
+              sessionStore.incrementRequestCount(server.url);
+            }
+          } catch (retryError) {
+            clearTimeout(retryTimeout);
+            appLog.debug(`MCP tools/list retry failed for ${server.id}:`, retryError);
+          }
+        }
       }
     } catch (toolsError) {
       // Tools listing is optional - don't fail the connection test
