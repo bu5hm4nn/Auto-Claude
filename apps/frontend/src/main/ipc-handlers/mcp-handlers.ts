@@ -470,9 +470,10 @@ async function testHttpConnection(server: CustomMcpServer, startTime: number): P
           tools = toolsData.result.tools.map((t: { name: string }) => t.name);
         }
       }
-    } catch {
+    } catch (toolsError) {
       // Tools listing is optional - don't fail the connection test
       clearTimeout(toolsTimeout);
+      appLog.debug(`MCP tools/list request failed for ${server.id}:`, toolsError);
     }
 
     return {
@@ -603,9 +604,10 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
           tools = toolsData.result.tools.map((t: { name: string }) => t.name);
         }
       }
-    } catch {
+    } catch (toolsError) {
       // Tools listing is optional - don't fail the connection test
       clearTimeout(toolsTimeout);
+      appLog.debug(`MCP tools/list request failed for ${server.id}:`, toolsError);
     }
 
     return {
