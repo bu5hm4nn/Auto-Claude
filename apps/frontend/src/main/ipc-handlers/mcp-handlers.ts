@@ -974,6 +974,104 @@ async function testCommandConnection(server: CustomMcpServer, startTime: number)
 }
 
 /**
+ * Terminate a Streamable HTTP session by sending HTTP DELETE with Mcp-Session-Id header.
+ * Per MCP spec 2025-03-26: clients SHOULD send HTTP DELETE to explicitly terminate sessions.
+ *
+ * @param serverUrl - The server URL with an active session
+ * @param headers - Optional custom headers to include in the request
+ * @returns Result indicating success/failure of termination
+ */
+async function terminateMcpSession(
+  serverUrl: string,
+  headers?: Record<string, string>
+): Promise<{ success: boolean; message: string; statusCode?: number }> {
+  const sessionStore = getMcpSessionStore();
+
+  // Check if there's an active session to terminate
+  const session = sessionStore.getSession(serverUrl);
+  if (!session) {
+    return {
+      success: false,
+      message: 'No session exists for this server',
+    };
+  }
+
+  const sessionId = session.sessionId;
+  if (!sessionId) {
+    // No session ID - just clear the store entry
+    sessionStore.clearSession(serverUrl);
+    return {
+      success: true,
+      message: 'Session cleared (no session ID to terminate)',
+    };
+  }
+
+  // Mark session as terminating
+  sessionStore.updateState(serverUrl, 'terminating');
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+
+    const requestHeaders: Record<string, string> = {
+      'Mcp-Session-Id': sessionId,
+    };
+
+    // Add custom headers if provided
+    if (headers) {
+      Object.assign(requestHeaders, headers);
+    }
+
+    // Send HTTP DELETE to terminate session
+    const response = await fetch(serverUrl, {
+      method: 'DELETE',
+      headers: requestHeaders,
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeout);
+
+    // Mark termination complete in store
+    sessionStore.terminationComplete(serverUrl, response.ok, response.status);
+
+    if (response.ok || response.status === 204) {
+      // 200 or 204 indicates successful termination
+      appLog.debug(`MCP session terminated successfully for ${serverUrl}`);
+      return {
+        success: true,
+        message: 'Session terminated successfully',
+        statusCode: response.status,
+      };
+    } else if (response.status === 404) {
+      // 404 likely means session already expired - still consider it terminated
+      appLog.debug(`MCP session already expired for ${serverUrl} (404)`);
+      return {
+        success: true,
+        message: 'Session already expired or terminated',
+        statusCode: response.status,
+      };
+    } else {
+      appLog.debug(`MCP session termination returned HTTP ${response.status} for ${serverUrl}`);
+      return {
+        success: false,
+        message: `Server returned HTTP ${response.status}`,
+        statusCode: response.status,
+      };
+    }
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+
+    // Still clear the session even if DELETE failed (best effort cleanup)
+    sessionStore.terminationComplete(serverUrl, false);
+
+    return {
+      success: false,
+      message: mapNetworkErrorToMessage(errorMessage),
+    };
+  }
+}
+
+/**
  * Register MCP IPC handlers.
  */
 export function registerMcpHandlers(): void {
@@ -1001,6 +1099,56 @@ export function registerMcpHandlers(): void {
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Connection test failed',
+      };
+    }
+  });
+
+  // Terminate MCP session (HTTP DELETE with Mcp-Session-Id)
+  ipcMain.handle(
+    IPC_CHANNELS.MCP_SESSION_TERMINATE,
+    async (_event, serverUrl: string, headers?: Record<string, string>) => {
+      try {
+        const result = await terminateMcpSession(serverUrl, headers);
+        return { success: result.success, data: result };
+      } catch (error) {
+        appLog.error('MCP session termination error:', error);
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Session termination failed',
+        };
+      }
+    }
+  );
+
+  // Get session status for a server
+  ipcMain.handle(
+    IPC_CHANNELS.MCP_SESSION_GET_STATUS,
+    async (_event, serverUrl: string, serverName?: string) => {
+      try {
+        const sessionStore = getMcpSessionStore();
+        const status = sessionStore.getSessionStatus(serverUrl, serverName);
+        return { success: true, data: status };
+      } catch (error) {
+        appLog.error('MCP session status error:', error);
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to get session status',
+        };
+      }
+    }
+  );
+
+  // Get all active sessions
+  ipcMain.handle(IPC_CHANNELS.MCP_SESSION_GET_ALL, async () => {
+    try {
+      const sessionStore = getMcpSessionStore();
+      const sessions = sessionStore.getAllSessions();
+      return { success: true, data: sessions };
+    } catch (error) {
+      appLog.error('MCP get all sessions error:', error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to get sessions',
       };
     }
   });
