@@ -6,11 +6,24 @@
 
 import { ipcMain } from 'electron';
 import { IPC_CHANNELS } from '../../shared/constants/ipc';
-import type { CustomMcpServer, McpHealthCheckResult, McpHealthStatus, McpTestConnectionResult } from '../../shared/types/project';
-import { spawn } from 'child_process';
+import type {
+  CustomMcpServer,
+  McpHealthCheckResult,
+  McpHealthStatus,
+  McpSession,
+  McpSessionState,
+  McpSessionStatus,
+  McpTestConnectionResult,
+} from '../../shared/types/project';
+import { spawn, execFileSync } from 'child_process';
+import path from 'path';
+import { existsSync } from 'fs';
+import { app } from 'electron';
 import { appLog } from '../app-logger';
 import { isWindows } from '../platform';
 import { getMcpSessionStore } from '../mcp/session-store';
+import { parsePythonCommand } from '../python-detector';
+import { getConfiguredPythonPath, pythonEnvManager } from '../python-env-manager';
 
 /**
  * Defense-in-depth: Frontend-side command validation
@@ -79,6 +92,391 @@ export function mapNetworkErrorToMessage(errorMessage: string): string {
   }
   return 'Connection failed';
 }
+
+// ============================================================================
+// Backend Session Communication Helpers
+// ============================================================================
+
+/**
+ * Get the path to the backend source directory.
+ * Handles both development and packaged app scenarios.
+ *
+ * @returns Path to backend source, or null if not found
+ */
+function getBackendSourcePath(): string | null {
+  // Validate path - check if mcp_session_ipc.py exists
+  const validatePath = (p: string): boolean => {
+    return existsSync(p) && existsSync(path.join(p, 'services', 'mcp_session_ipc.py'));
+  };
+
+  const possiblePaths = [
+    // Packaged app: backend is in extraResources (process.resourcesPath/backend)
+    ...(app.isPackaged ? [path.join(process.resourcesPath, 'backend')] : []),
+    // Dev mode: from dist/main -> ../../backend (apps/frontend/out/main -> apps/backend)
+    path.resolve(__dirname, '..', '..', '..', 'backend'),
+    // Alternative: from app root -> apps/backend
+    path.resolve(app.getAppPath(), '..', 'backend'),
+    // If running from repo root with apps structure
+    path.resolve(process.cwd(), 'apps', 'backend'),
+  ];
+
+  for (const p of possiblePaths) {
+    if (validatePath(p)) {
+      return p;
+    }
+  }
+  return null;
+}
+
+/**
+ * Execute a backend MCP session IPC command via subprocess.
+ * Communicates with the backend MCPSessionManager, which is the single source of truth
+ * for session state.
+ *
+ * @param message - The IPC message to send (type + data fields)
+ * @returns Promise resolving to the backend response
+ */
+async function executeBackendSessionIpc<T>(
+  message: Record<string, unknown>
+): Promise<{ success: boolean; data?: T; error?: string }> {
+  const backendPath = getBackendSourcePath();
+  if (!backendPath) {
+    appLog.error('[MCP Session IPC] Backend source path not found');
+    return {
+      success: false,
+      error: 'Backend source path not found',
+    };
+  }
+
+  const pythonPath = getConfiguredPythonPath();
+  const [pythonCommand, pythonBaseArgs] = parsePythonCommand(pythonPath);
+  const moduleArgs = ['-m', 'services.mcp_session_ipc', JSON.stringify(message)];
+
+  return new Promise((resolve) => {
+    try {
+      // Use execFileSync for simple request-response pattern
+      // This is more efficient than spawn for one-shot IPC calls
+      const output = execFileSync(pythonCommand, [...pythonBaseArgs, ...moduleArgs], {
+        cwd: backendPath,
+        env: {
+          ...pythonEnvManager.getPythonEnv(),
+          PYTHONPATH: backendPath,
+        },
+        timeout: 10000, // 10 second timeout
+        encoding: 'utf-8',
+        maxBuffer: 1024 * 1024, // 1MB buffer
+        windowsHide: true,
+      });
+
+      try {
+        const response = JSON.parse(output.trim());
+        resolve({
+          success: response.success ?? false,
+          data: response,
+          error: response.error || response.message,
+        });
+      } catch (parseError) {
+        appLog.error('[MCP Session IPC] Failed to parse response:', output);
+        resolve({
+          success: false,
+          error: 'Failed to parse backend response',
+        });
+      }
+    } catch (execError) {
+      const errorMessage = execError instanceof Error ? execError.message : String(execError);
+      appLog.error('[MCP Session IPC] Execution failed:', errorMessage);
+      resolve({
+        success: false,
+        error: errorMessage,
+      });
+    }
+  });
+}
+
+/**
+ * Backend response for session set operation.
+ */
+interface BackendSessionSetResponse {
+  success: boolean;
+  message: string;
+  session: McpSession | null;
+}
+
+/**
+ * Backend response for session get operation.
+ */
+interface BackendSessionGetResponse {
+  success: boolean;
+  message: string;
+  session: McpSession | null;
+}
+
+/**
+ * Backend response for get all sessions operation.
+ */
+interface BackendSessionGetAllResponse {
+  success: boolean;
+  message: string;
+  sessions: McpSession[];
+}
+
+/**
+ * Backend response for session terminate operation.
+ */
+interface BackendSessionTerminateResponse {
+  success: boolean;
+  message: string;
+  result: {
+    server_url: string;
+    success: boolean;
+    message: string;
+  } | null;
+}
+
+/**
+ * Sync session state to the backend MCPSessionManager.
+ * Called by frontend when:
+ * - A new session ID is captured from Mcp-Session-Id response header
+ * - Session state changes (initializing, active, error, reconnecting, etc.)
+ *
+ * @param serverUrl - The URL of the MCP server
+ * @param sessionId - The session ID (can be null)
+ * @param state - Session lifecycle state
+ * @param error - Optional error message if state is 'error'
+ * @returns Promise resolving to the updated session data
+ */
+export async function syncSessionToBackend(
+  serverUrl: string,
+  sessionId: string | null,
+  state: McpSessionState,
+  error?: string
+): Promise<{ success: boolean; session?: McpSession; error?: string }> {
+  const message: Record<string, unknown> = {
+    type: 'mcp:session:set',
+    server_url: serverUrl,
+    state,
+  };
+
+  if (sessionId !== null) {
+    message.session_id = sessionId;
+  }
+
+  if (error) {
+    message.error = error;
+  }
+
+  const result = await executeBackendSessionIpc<BackendSessionSetResponse>(message);
+
+  if (result.success && result.data?.session) {
+    // Convert snake_case keys to camelCase for frontend consumption
+    const session = convertBackendSession(result.data.session);
+    appLog.debug(`[MCP Session] Synced to backend: ${serverUrl} -> ${state}`);
+    return { success: true, session };
+  }
+
+  return {
+    success: false,
+    error: result.error || 'Failed to sync session to backend',
+  };
+}
+
+/**
+ * Get session state from the backend MCPSessionManager.
+ *
+ * @param serverUrl - The URL of the MCP server
+ * @returns Promise resolving to the session data, or undefined if not found
+ */
+export async function getSessionFromBackend(
+  serverUrl: string
+): Promise<{ success: boolean; session?: McpSession; error?: string }> {
+  const result = await executeBackendSessionIpc<BackendSessionGetResponse>({
+    type: 'mcp:session:get',
+    server_url: serverUrl,
+  });
+
+  if (result.success) {
+    const session = result.data?.session ? convertBackendSession(result.data.session) : undefined;
+    return { success: true, session };
+  }
+
+  return {
+    success: false,
+    error: result.error || 'Failed to get session from backend',
+  };
+}
+
+/**
+ * Get all sessions from the backend MCPSessionManager.
+ *
+ * @returns Promise resolving to array of all sessions
+ */
+export async function getAllSessionsFromBackend(): Promise<{
+  success: boolean;
+  sessions?: McpSession[];
+  error?: string;
+}> {
+  const result = await executeBackendSessionIpc<BackendSessionGetAllResponse>({
+    type: 'mcp:session:getAll',
+  });
+
+  if (result.success && result.data?.sessions) {
+    const sessions = result.data.sessions.map(convertBackendSession);
+    return { success: true, sessions };
+  }
+
+  return {
+    success: false,
+    sessions: [],
+    error: result.error || 'Failed to get sessions from backend',
+  };
+}
+
+/**
+ * Initiate session termination in the backend MCPSessionManager.
+ * This marks the session as 'terminating' - the actual HTTP DELETE request
+ * should be performed by the caller after receiving a successful response.
+ *
+ * @param serverUrl - The URL of the MCP server
+ * @returns Promise resolving to the termination result
+ */
+export async function terminateSessionInBackend(serverUrl: string): Promise<{
+  success: boolean;
+  message: string;
+  sessionId?: string | null;
+}> {
+  // First, get the session to retrieve the session ID for HTTP DELETE
+  const getResult = await getSessionFromBackend(serverUrl);
+  const sessionId = getResult.session?.sessionId ?? null;
+
+  const result = await executeBackendSessionIpc<BackendSessionTerminateResponse>({
+    type: 'mcp:session:terminate',
+    server_url: serverUrl,
+  });
+
+  if (result.success && result.data?.result) {
+    return {
+      success: result.data.result.success,
+      message: result.data.result.message,
+      sessionId,
+    };
+  }
+
+  return {
+    success: false,
+    message: result.error || 'Failed to terminate session in backend',
+    sessionId,
+  };
+}
+
+/**
+ * Mark session termination as complete in the backend.
+ * Called after the HTTP DELETE request completes.
+ *
+ * @param serverUrl - The URL of the MCP server
+ * @param success - Whether the HTTP DELETE succeeded
+ * @param statusCode - The HTTP status code from the DELETE request
+ */
+export async function notifyTerminationComplete(
+  serverUrl: string,
+  success: boolean,
+  statusCode?: number
+): Promise<void> {
+  // Clear the session in backend by setting state to 'disconnected'
+  await syncSessionToBackend(serverUrl, null, 'disconnected');
+  appLog.debug(
+    `[MCP Session] Termination complete for ${serverUrl} (success: ${success}, status: ${statusCode ?? 'n/a'})`
+  );
+}
+
+/**
+ * Get session status for display in UI.
+ * Fetches from backend and converts to status format.
+ *
+ * @param serverUrl - The URL of the MCP server
+ * @param serverName - Optional display name for the server
+ * @returns Promise resolving to session status
+ */
+export async function getSessionStatusFromBackend(
+  serverUrl: string,
+  serverName?: string
+): Promise<McpSessionStatus> {
+  const result = await getSessionFromBackend(serverUrl);
+
+  if (!result.success || !result.session) {
+    return {
+      serverUrl,
+      serverName,
+      isActive: false,
+      state: 'disconnected',
+      statusMessage: 'No session',
+      requestCount: 0,
+    };
+  }
+
+  const session = result.session;
+  const isActive = session.state === 'active';
+  let durationSeconds: number | undefined;
+
+  if (isActive && session.establishedAt) {
+    const established = new Date(session.establishedAt).getTime();
+    durationSeconds = Math.floor((Date.now() - established) / 1000);
+  }
+
+  let statusMessage: string;
+  switch (session.state) {
+    case 'disconnected':
+      statusMessage = 'Disconnected';
+      break;
+    case 'initializing':
+      statusMessage = 'Connecting...';
+      break;
+    case 'active':
+      statusMessage = `Active (${session.requestCount} requests)`;
+      break;
+    case 'reconnecting':
+      statusMessage = `Reconnecting (attempt ${session.reinitializeCount + 1})`;
+      break;
+    case 'terminating':
+      statusMessage = 'Disconnecting...';
+      break;
+    case 'error':
+      statusMessage = session.lastError || 'Error';
+      break;
+    default:
+      statusMessage = 'Unknown';
+  }
+
+  return {
+    serverUrl,
+    serverName,
+    isActive,
+    state: session.state,
+    statusMessage,
+    durationSeconds,
+    requestCount: session.requestCount,
+  };
+}
+
+/**
+ * Convert backend session object (snake_case) to frontend format (camelCase).
+ * The backend uses Python naming conventions, while frontend uses JavaScript conventions.
+ */
+function convertBackendSession(backendSession: Record<string, unknown>): McpSession {
+  return {
+    serverUrl: (backendSession.server_url as string) || '',
+    sessionId: (backendSession.session_id as string | null) ?? null,
+    state: (backendSession.state as McpSessionState) || 'disconnected',
+    establishedAt: (backendSession.established_at as string | null) ?? null,
+    lastActivityAt: (backendSession.last_activity_at as string | null) ?? null,
+    requestCount: (backendSession.request_count as number) || 0,
+    reinitializeCount: (backendSession.reinitialize_count as number) || 0,
+    lastError: backendSession.last_error as string | undefined,
+  };
+}
+
+// ============================================================================
+// End Backend Session Communication Helpers
+// ============================================================================
 
 /**
  * Quick health check for a custom MCP server.
