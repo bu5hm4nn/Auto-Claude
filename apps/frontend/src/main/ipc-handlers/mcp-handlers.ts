@@ -650,6 +650,11 @@ async function checkStreamableHttpHealth(
       sessionStore.clearSession(server.url);
       sessionStore.updateState(server.url, 'reconnecting');
 
+      // Sync reconnecting state to backend (single source of truth)
+      syncSessionToBackend(server.url, null, 'reconnecting').catch((err) => {
+        appLog.debug(`Failed to sync reconnecting state to backend for ${server.id}:`, err);
+      });
+
       // Attempt to re-initialize the session
       const reinitResult = await reinitializeStreamableHttpSession(server, startTime);
       if (reinitResult.success) {
@@ -657,7 +662,16 @@ async function checkStreamableHttpHealth(
         return checkStreamableHttpHealth(server, startTime, true);
       }
 
-      // Re-initialization failed
+      // Re-initialization failed - sync error state to backend
+      syncSessionToBackend(
+        server.url,
+        null,
+        'error',
+        `Session ${response.status === 400 ? 'missing' : 'expired'}, re-initialization failed`
+      ).catch((err) => {
+        appLog.debug(`Failed to sync error state to backend for ${server.id}:`, err);
+      });
+
       return {
         serverId: server.id,
         status: 'unhealthy',
