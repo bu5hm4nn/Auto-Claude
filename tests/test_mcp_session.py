@@ -872,3 +872,515 @@ class TestSingletonFunctions:
 
         # Listener should have been notified of clear
         assert len(notifications) == 1
+
+
+# =============================================================================
+# Tests for MCP Session IPC Handlers (services/mcp_session_ipc.py)
+# =============================================================================
+
+
+class TestHandleMCPSessionSet:
+    """Tests for handle_mcp_session_set() IPC handler."""
+
+    @pytest.fixture(autouse=True)
+    def reset_singleton(self):
+        """Reset singleton before and after each test."""
+        from core.mcp_session import reset_mcp_session_manager
+
+        reset_mcp_session_manager()
+        yield
+        reset_mcp_session_manager()
+
+    def test_missing_server_url_returns_error(self):
+        """Returns error when server_url is missing."""
+        from services.mcp_session_ipc import handle_mcp_session_set
+
+        result = handle_mcp_session_set({"state": "active"})
+
+        assert result["success"] is False
+        assert "server_url" in result["message"]
+        assert result["session"] is None
+
+    def test_missing_state_returns_error(self):
+        """Returns error when state is missing."""
+        from services.mcp_session_ipc import handle_mcp_session_set
+
+        result = handle_mcp_session_set({"server_url": "https://example.com/mcp"})
+
+        assert result["success"] is False
+        assert "state" in result["message"]
+        assert result["session"] is None
+
+    def test_invalid_state_returns_error(self):
+        """Returns error for invalid state value."""
+        from services.mcp_session_ipc import handle_mcp_session_set
+
+        result = handle_mcp_session_set({
+            "server_url": "https://example.com/mcp",
+            "state": "invalid_state",
+        })
+
+        assert result["success"] is False
+        assert "Invalid state" in result["message"]
+        assert "invalid_state" in result["message"]
+        assert result["session"] is None
+
+    def test_sets_session_with_session_id(self):
+        """Successfully sets session with session_id."""
+        from services.mcp_session_ipc import handle_mcp_session_set
+        from core.mcp_session import get_mcp_session_manager
+
+        result = handle_mcp_session_set({
+            "server_url": "https://example.com/mcp",
+            "session_id": "test-session-12345",
+            "state": "active",
+        })
+
+        assert result["success"] is True
+        assert result["message"] == "Session state updated"
+        assert result["session"] is not None
+        assert result["session"]["server_url"] == "https://example.com/mcp"
+        assert result["session"]["state"] == "active"
+        assert result["session"]["session_id_masked"] == "test****"
+
+        # Verify session was actually stored
+        manager = get_mcp_session_manager()
+        session = manager.get_session("https://example.com/mcp")
+        assert session is not None
+        assert session.session_id == "test-session-12345"
+
+    def test_sets_session_without_session_id_for_initializing(self):
+        """Sets session without session_id when state is initializing."""
+        from services.mcp_session_ipc import handle_mcp_session_set
+        from core.mcp_session import get_mcp_session_manager, MCPSessionState
+
+        result = handle_mcp_session_set({
+            "server_url": "https://example.com/mcp",
+            "state": "initializing",
+        })
+
+        assert result["success"] is True
+        assert result["session"] is not None
+        assert result["session"]["state"] == "initializing"
+
+        manager = get_mcp_session_manager()
+        session = manager.get_session("https://example.com/mcp")
+        assert session.state == MCPSessionState.INITIALIZING
+
+    def test_updates_state_with_error_message(self):
+        """Updates session state with error message."""
+        from services.mcp_session_ipc import handle_mcp_session_set
+        from core.mcp_session import get_mcp_session_manager, MCPSessionState
+
+        # First create an active session
+        handle_mcp_session_set({
+            "server_url": "https://example.com/mcp",
+            "session_id": "test-session-12345",
+            "state": "active",
+        })
+
+        # Then update to error state
+        result = handle_mcp_session_set({
+            "server_url": "https://example.com/mcp",
+            "state": "error",
+            "error": "Connection failed",
+        })
+
+        assert result["success"] is True
+        assert result["session"]["state"] == "error"
+        assert result["session"]["last_error"] == "Connection failed"
+
+        manager = get_mcp_session_manager()
+        session = manager.get_session("https://example.com/mcp")
+        assert session.state == MCPSessionState.ERROR
+        assert session.last_error == "Connection failed"
+
+    def test_handles_all_valid_states(self):
+        """Successfully handles all valid session states."""
+        from services.mcp_session_ipc import handle_mcp_session_set
+        from core.mcp_session import MCPSessionState
+
+        valid_states = [s.value for s in MCPSessionState]
+
+        for state in valid_states:
+            result = handle_mcp_session_set({
+                "server_url": f"https://{state}.example.com/mcp",
+                "session_id": f"session-{state}",
+                "state": state,
+            })
+            assert result["success"] is True, f"Failed for state: {state}"
+            assert result["session"]["state"] == state
+
+
+class TestHandleMCPSessionGet:
+    """Tests for handle_mcp_session_get() IPC handler."""
+
+    @pytest.fixture(autouse=True)
+    def reset_singleton(self):
+        """Reset singleton before and after each test."""
+        from core.mcp_session import reset_mcp_session_manager
+
+        reset_mcp_session_manager()
+        yield
+        reset_mcp_session_manager()
+
+    def test_missing_server_url_returns_error(self):
+        """Returns error when server_url is missing."""
+        from services.mcp_session_ipc import handle_mcp_session_get
+
+        result = handle_mcp_session_get({})
+
+        assert result["success"] is False
+        assert "server_url" in result["message"]
+        assert result["session"] is None
+
+    def test_returns_none_for_unknown_server(self):
+        """Returns None session for unknown server URL."""
+        from services.mcp_session_ipc import handle_mcp_session_get
+
+        result = handle_mcp_session_get({
+            "server_url": "https://unknown.example.com/mcp",
+        })
+
+        assert result["success"] is True
+        assert "No session exists" in result["message"]
+        assert result["session"] is None
+
+    def test_returns_existing_session(self):
+        """Returns existing session data."""
+        from services.mcp_session_ipc import handle_mcp_session_get, handle_mcp_session_set
+
+        # First create a session
+        handle_mcp_session_set({
+            "server_url": "https://example.com/mcp",
+            "session_id": "test-session-12345",
+            "state": "active",
+        })
+
+        # Then retrieve it
+        result = handle_mcp_session_get({
+            "server_url": "https://example.com/mcp",
+        })
+
+        assert result["success"] is True
+        assert result["message"] == "Session retrieved"
+        assert result["session"] is not None
+        assert result["session"]["server_url"] == "https://example.com/mcp"
+        assert result["session"]["session_id_masked"] == "test****"
+        assert result["session"]["state"] == "active"
+
+
+class TestHandleMCPSessionGetAll:
+    """Tests for handle_mcp_session_get_all() IPC handler."""
+
+    @pytest.fixture(autouse=True)
+    def reset_singleton(self):
+        """Reset singleton before and after each test."""
+        from core.mcp_session import reset_mcp_session_manager
+
+        reset_mcp_session_manager()
+        yield
+        reset_mcp_session_manager()
+
+    def test_returns_empty_list_when_no_sessions(self):
+        """Returns empty list when no sessions exist."""
+        from services.mcp_session_ipc import handle_mcp_session_get_all
+
+        result = handle_mcp_session_get_all({})
+
+        assert result["success"] is True
+        assert "Retrieved 0 sessions" in result["message"]
+        assert result["sessions"] == []
+
+    def test_returns_all_sessions(self):
+        """Returns all existing sessions."""
+        from services.mcp_session_ipc import handle_mcp_session_get_all, handle_mcp_session_set
+
+        # Create multiple sessions
+        handle_mcp_session_set({
+            "server_url": "https://server1.example.com/mcp",
+            "session_id": "session-1",
+            "state": "active",
+        })
+        handle_mcp_session_set({
+            "server_url": "https://server2.example.com/mcp",
+            "session_id": "session-2",
+            "state": "active",
+        })
+        handle_mcp_session_set({
+            "server_url": "https://server3.example.com/mcp",
+            "session_id": "session-3",
+            "state": "initializing",
+        })
+
+        result = handle_mcp_session_get_all({})
+
+        assert result["success"] is True
+        assert "Retrieved 3 sessions" in result["message"]
+        assert len(result["sessions"]) == 3
+
+        # Verify session URLs are present
+        urls = [s["server_url"] for s in result["sessions"]]
+        assert "https://server1.example.com/mcp" in urls
+        assert "https://server2.example.com/mcp" in urls
+        assert "https://server3.example.com/mcp" in urls
+
+    def test_sessions_have_masked_ids(self):
+        """Returned sessions have masked session IDs."""
+        from services.mcp_session_ipc import handle_mcp_session_get_all, handle_mcp_session_set
+
+        handle_mcp_session_set({
+            "server_url": "https://example.com/mcp",
+            "session_id": "secret-session-id-12345",
+            "state": "active",
+        })
+
+        result = handle_mcp_session_get_all({})
+
+        assert result["sessions"][0]["session_id_masked"] == "secr****"
+        assert "secret-session-id-12345" not in str(result)
+
+
+class TestHandleMCPSessionTerminate:
+    """Tests for handle_mcp_session_terminate() IPC handler."""
+
+    @pytest.fixture(autouse=True)
+    def reset_singleton(self):
+        """Reset singleton before and after each test."""
+        from core.mcp_session import reset_mcp_session_manager
+
+        reset_mcp_session_manager()
+        yield
+        reset_mcp_session_manager()
+
+    def test_missing_server_url_returns_error(self):
+        """Returns error when server_url is missing."""
+        from services.mcp_session_ipc import handle_mcp_session_terminate
+
+        result = handle_mcp_session_terminate({})
+
+        assert result["success"] is False
+        assert "server_url" in result["message"]
+        assert result["result"] is None
+
+    def test_terminate_nonexistent_session_fails(self):
+        """Terminating non-existent session returns failure."""
+        from services.mcp_session_ipc import handle_mcp_session_terminate
+
+        result = handle_mcp_session_terminate({
+            "server_url": "https://unknown.example.com/mcp",
+        })
+
+        assert result["success"] is False
+        assert "No session exists" in result["message"]
+        assert result["result"] is not None
+        assert result["result"]["success"] is False
+
+    def test_terminate_active_session_succeeds(self):
+        """Terminating active session initiates termination."""
+        from services.mcp_session_ipc import handle_mcp_session_terminate, handle_mcp_session_set
+        from core.mcp_session import get_mcp_session_manager, MCPSessionState
+
+        # Create an active session
+        handle_mcp_session_set({
+            "server_url": "https://example.com/mcp",
+            "session_id": "test-session-12345",
+            "state": "active",
+        })
+
+        # Terminate it
+        result = handle_mcp_session_terminate({
+            "server_url": "https://example.com/mcp",
+        })
+
+        assert result["success"] is True
+        assert "termination initiated" in result["message"]
+        assert result["result"] is not None
+        assert result["result"]["success"] is True
+
+        # Verify session state changed to terminating
+        manager = get_mcp_session_manager()
+        session = manager.get_session("https://example.com/mcp")
+        assert session.state == MCPSessionState.TERMINATING
+
+    def test_terminate_session_without_id_clears_session(self):
+        """Terminating session without ID clears it directly."""
+        from services.mcp_session_ipc import handle_mcp_session_terminate, handle_mcp_session_set
+        from core.mcp_session import get_mcp_session_manager
+
+        # Create a session without ID
+        handle_mcp_session_set({
+            "server_url": "https://example.com/mcp",
+            "state": "initializing",
+        })
+
+        # Terminate it
+        result = handle_mcp_session_terminate({
+            "server_url": "https://example.com/mcp",
+        })
+
+        assert result["success"] is True
+        assert "no session ID" in result["message"]
+
+        # Verify session was cleared
+        manager = get_mcp_session_manager()
+        session = manager.get_session("https://example.com/mcp")
+        assert session is None
+
+
+class TestDispatchMCPSessionMessage:
+    """Tests for dispatch_mcp_session_message() function."""
+
+    @pytest.fixture(autouse=True)
+    def reset_singleton(self):
+        """Reset singleton before and after each test."""
+        from core.mcp_session import reset_mcp_session_manager
+
+        reset_mcp_session_manager()
+        yield
+        reset_mcp_session_manager()
+
+    def test_missing_type_returns_error(self):
+        """Returns error when message type is missing."""
+        from services.mcp_session_ipc import dispatch_mcp_session_message
+
+        result = dispatch_mcp_session_message({
+            "server_url": "https://example.com/mcp",
+        })
+
+        assert result["success"] is False
+        assert "Missing required field: type" in result["message"]
+        assert result["error"] == "MISSING_TYPE"
+
+    def test_unknown_type_returns_error(self):
+        """Returns error for unknown message type."""
+        from services.mcp_session_ipc import dispatch_mcp_session_message
+
+        result = dispatch_mcp_session_message({
+            "type": "mcp:session:unknown",
+            "server_url": "https://example.com/mcp",
+        })
+
+        assert result["success"] is False
+        assert "Unknown message type" in result["message"]
+        assert result["error"] == "UNKNOWN_TYPE"
+
+    def test_dispatches_session_set(self):
+        """Correctly dispatches mcp:session:set messages."""
+        from services.mcp_session_ipc import dispatch_mcp_session_message
+
+        result = dispatch_mcp_session_message({
+            "type": "mcp:session:set",
+            "server_url": "https://example.com/mcp",
+            "session_id": "test-session-12345",
+            "state": "active",
+        })
+
+        assert result["success"] is True
+        assert result["session"]["state"] == "active"
+
+    def test_dispatches_session_get(self):
+        """Correctly dispatches mcp:session:get messages."""
+        from services.mcp_session_ipc import dispatch_mcp_session_message
+
+        # First create a session
+        dispatch_mcp_session_message({
+            "type": "mcp:session:set",
+            "server_url": "https://example.com/mcp",
+            "session_id": "test-session-12345",
+            "state": "active",
+        })
+
+        # Then get it
+        result = dispatch_mcp_session_message({
+            "type": "mcp:session:get",
+            "server_url": "https://example.com/mcp",
+        })
+
+        assert result["success"] is True
+        assert result["session"] is not None
+
+    def test_dispatches_session_get_all(self):
+        """Correctly dispatches mcp:session:getAll messages."""
+        from services.mcp_session_ipc import dispatch_mcp_session_message
+
+        # Create a session
+        dispatch_mcp_session_message({
+            "type": "mcp:session:set",
+            "server_url": "https://example.com/mcp",
+            "session_id": "test-session-12345",
+            "state": "active",
+        })
+
+        result = dispatch_mcp_session_message({
+            "type": "mcp:session:getAll",
+        })
+
+        assert result["success"] is True
+        assert len(result["sessions"]) == 1
+
+    def test_dispatches_session_terminate(self):
+        """Correctly dispatches mcp:session:terminate messages."""
+        from services.mcp_session_ipc import dispatch_mcp_session_message
+
+        # Create a session
+        dispatch_mcp_session_message({
+            "type": "mcp:session:set",
+            "server_url": "https://example.com/mcp",
+            "session_id": "test-session-12345",
+            "state": "active",
+        })
+
+        result = dispatch_mcp_session_message({
+            "type": "mcp:session:terminate",
+            "server_url": "https://example.com/mcp",
+        })
+
+        assert result["success"] is True
+        assert "termination initiated" in result["message"]
+
+    def test_strips_type_from_data(self):
+        """Type field is stripped before passing to handler."""
+        from services.mcp_session_ipc import dispatch_mcp_session_message
+
+        # If type wasn't stripped, it would be passed to handler and potentially cause issues
+        result = dispatch_mcp_session_message({
+            "type": "mcp:session:set",
+            "server_url": "https://example.com/mcp",
+            "session_id": "test-session-12345",
+            "state": "active",
+        })
+
+        # The fact that this succeeds indicates type was properly stripped
+        assert result["success"] is True
+
+
+class TestMCPSessionHandlersRegistry:
+    """Tests for MCP_SESSION_HANDLERS registry."""
+
+    def test_all_handlers_registered(self):
+        """All expected handlers are in the registry."""
+        from services.mcp_session_ipc import MCP_SESSION_HANDLERS
+
+        expected_handlers = [
+            "mcp:session:set",
+            "mcp:session:get",
+            "mcp:session:getAll",
+            "mcp:session:terminate",
+        ]
+
+        for handler_type in expected_handlers:
+            assert handler_type in MCP_SESSION_HANDLERS, f"Missing handler: {handler_type}"
+
+    def test_handlers_are_callable(self):
+        """All registered handlers are callable."""
+        from services.mcp_session_ipc import MCP_SESSION_HANDLERS
+
+        for handler_type, handler in MCP_SESSION_HANDLERS.items():
+            assert callable(handler), f"Handler {handler_type} is not callable"
+
+    def test_handler_count_matches_expected(self):
+        """Registry has exactly the expected number of handlers."""
+        from services.mcp_session_ipc import MCP_SESSION_HANDLERS
+
+        assert len(MCP_SESSION_HANDLERS) == 4
