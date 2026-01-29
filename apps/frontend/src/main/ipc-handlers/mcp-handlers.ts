@@ -10,6 +10,7 @@ import type { CustomMcpServer, McpHealthCheckResult, McpHealthStatus, McpTestCon
 import { spawn } from 'child_process';
 import { appLog } from '../app-logger';
 import { isWindows } from '../platform';
+import { getMcpSessionStore } from '../mcp/session-store';
 
 /**
  * Defense-in-depth: Frontend-side command validation
@@ -485,6 +486,7 @@ async function testHttpConnection(server: CustomMcpServer, startTime: number): P
 /**
  * Test Streamable HTTP MCP server connection by sending an MCP initialize request.
  * Uses MCP protocol version 2025-03-26 and proper Accept header for streaming support.
+ * Captures Mcp-Session-Id from initialize response headers for session management.
  */
 async function testStreamableHttpConnection(server: CustomMcpServer, startTime: number): Promise<McpTestConnectionResult> {
   if (!server.url) {
@@ -495,9 +497,14 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
     };
   }
 
+  const sessionStore = getMcpSessionStore();
+
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+
+    // Mark session as initializing
+    sessionStore.updateState(server.url, 'initializing');
 
     // Streamable HTTP requires Accept header with both JSON and SSE support
     const headers: Record<string, string> = {
@@ -535,6 +542,7 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
     const responseTime = Date.now() - startTime;
 
     if (!response.ok) {
+      sessionStore.updateState(server.url, 'error', `HTTP ${response.status}`);
       if (response.status === 401 || response.status === 403) {
         return {
           serverId: server.id,
@@ -554,12 +562,27 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
     const data = await response.json();
 
     if (data.error) {
+      sessionStore.updateState(server.url, 'error', 'MCP protocol error');
       return {
         serverId: server.id,
         success: false,
         message: 'MCP protocol error',
         responseTime,
       };
+    }
+
+    // Capture Mcp-Session-Id from response headers (case-insensitive per HTTP spec)
+    // The header name is 'Mcp-Session-Id' but fetch normalizes headers to lowercase
+    const sessionId = response.headers.get('mcp-session-id') || response.headers.get('Mcp-Session-Id');
+
+    // Store session ID if present - this establishes an active session
+    if (sessionId) {
+      sessionStore.setSession(server.url, sessionId, 'active');
+      appLog.debug(`MCP session established for ${server.id} (session ID captured)`);
+    } else {
+      // Server didn't return a session ID - still mark as active but without session
+      sessionStore.updateState(server.url, 'active');
+      appLog.debug(`MCP connection established for ${server.id} (no session ID returned)`);
     }
 
     // Now try to list tools (with separate timeout)
@@ -573,11 +596,17 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
       params: {},
     };
 
+    // Include session ID in subsequent requests if available
+    const toolsHeaders: Record<string, string> = { ...headers };
+    if (sessionId) {
+      toolsHeaders['Mcp-Session-Id'] = sessionId;
+    }
+
     let tools: string[] = [];
     try {
       const toolsResponse = await fetch(server.url, {
         method: 'POST',
-        headers,
+        headers: toolsHeaders,
         body: JSON.stringify(toolsRequest),
         signal: toolsController.signal,
       });
@@ -589,6 +618,8 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
         if (toolsData.result?.tools) {
           tools = toolsData.result.tools.map((t: { name: string }) => t.name);
         }
+        // Increment request count for successful request
+        sessionStore.incrementRequestCount(server.url);
       }
     } catch (toolsError) {
       // Tools listing is optional - don't fail the connection test
@@ -596,16 +627,23 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
       appLog.debug(`MCP tools/list request failed for ${server.id}:`, toolsError);
     }
 
+    const message = tools.length > 0
+      ? `Connected successfully, ${tools.length} tools available`
+      : 'Connected successfully (Streamable HTTP)';
+
     return {
       serverId: server.id,
       success: true,
-      message: tools.length > 0 ? `Connected successfully, ${tools.length} tools available` : 'Connected successfully (Streamable HTTP)',
+      message: sessionId ? `${message} [session active]` : message,
       tools,
       responseTime,
+      sessionId: sessionId ?? undefined,
     };
   } catch (error) {
     const responseTime = Date.now() - startTime;
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+
+    sessionStore.updateState(server.url, 'error', errorMessage);
 
     return {
       serverId: server.id,
