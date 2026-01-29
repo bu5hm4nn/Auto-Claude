@@ -163,14 +163,14 @@ export function CustomMcpDialog({
       return;
     }
 
-    if (formData.type === 'http' && !formData.url?.trim()) {
+    if ((formData.type === 'http' || formData.type === 'streamable-http') && !formData.url?.trim()) {
       setError(t('mcp.errorUrlRequired'));
       return;
     }
 
     // Build headers, merging bearer token if provided
     const finalHeaders: Record<string, string> = {};
-    if (formData.type === 'http') {
+    if (formData.type === 'http' || formData.type === 'streamable-http') {
       // Start with existing headers (excluding old Authorization if we have a new bearer token)
       if (formData.headers) {
         for (const [key, value] of Object.entries(formData.headers)) {
@@ -227,7 +227,7 @@ export function CustomMcpDialog({
 
   const isValid = formData.name.trim() && (
     (formData.type === 'command' && formData.command?.trim()) ||
-    (formData.type === 'http' && formData.url?.trim())
+    ((formData.type === 'http' || formData.type === 'streamable-http') && formData.url?.trim())
   );
 
   return (
@@ -255,7 +255,7 @@ export function CustomMcpDialog({
             <Label>{t('mcp.serverType')}</Label>
             <RadioGroup
               value={formData.type}
-              onValueChange={(value: 'command' | 'http') =>
+              onValueChange={(value: 'command' | 'http' | 'streamable-http') =>
                 setFormData(prev => ({ ...prev, type: value }))
               }
               className="flex gap-4"
@@ -272,6 +272,13 @@ export function CustomMcpDialog({
                 <Label htmlFor="type-http" className="flex items-center gap-1.5 cursor-pointer">
                   <Globe className="h-3.5 w-3.5" />
                   {t('mcp.typeHttp')}
+                </Label>
+              </div>
+              <div className="flex items-center gap-2">
+                <RadioGroupItem value="streamable-http" id="type-streamable-http" />
+                <Label htmlFor="type-streamable-http" className="flex items-center gap-1.5 cursor-pointer">
+                  <Globe className="h-3.5 w-3.5" />
+                  {t('mcp.typeStreamableHttp')}
                 </Label>
               </div>
             </RadioGroup>
@@ -338,7 +345,7 @@ export function CustomMcpDialog({
           )}
 
           {/* HTTP-based fields */}
-          {formData.type === 'http' && (
+          {(formData.type === 'http' || formData.type === 'streamable-http') && (
             <>
               <div className="space-y-2">
                 <Label htmlFor="url">{t('mcp.url')}</Label>

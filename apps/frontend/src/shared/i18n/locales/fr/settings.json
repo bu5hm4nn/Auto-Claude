@@ -713,6 +713,7 @@
     "serverType": "Type de serveur",
     "typeCommand": "Commande (npx/npm)",
     "typeHttp": "HTTP",
+    "typeStreamableHttp": "Streamable HTTP",
     "serverName": "Nom",
     "serverNamePlaceholder": "Mon serveur MCP",
     "serverDescription": "Description",
