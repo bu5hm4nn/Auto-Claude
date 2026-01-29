@@ -1596,13 +1596,13 @@ export function registerMcpHandlers(): void {
     }
   );
 
-  // Get session status for a server
+  // Get session status for a server (queries backend as single source of truth)
   ipcMain.handle(
     IPC_CHANNELS.MCP_SESSION_GET_STATUS,
     async (_event, serverUrl: string, serverName?: string) => {
       try {
-        const sessionStore = getMcpSessionStore();
-        const status = sessionStore.getSessionStatus(serverUrl, serverName);
+        // Fetch session status from backend MCPSessionManager
+        const status = await getSessionStatusFromBackend(serverUrl, serverName);
         return { success: true, data: status };
       } catch (error) {
         appLog.error('MCP session status error:', error);
