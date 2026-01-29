@@ -67,12 +67,15 @@ function areArgsSafe(args: string[] | undefined): boolean {
 /**
  * Quick health check for a custom MCP server.
  * For HTTP servers: makes a HEAD/GET request to check connectivity.
+ * For Streamable HTTP servers: uses proper Accept header for MCP protocol.
  * For command servers: checks if the command exists.
  */
 async function checkMcpHealth(server: CustomMcpServer): Promise<McpHealthCheckResult> {
   const startTime = Date.now();
 
-  if (server.type === 'http') {
+  if (server.type === 'streamable-http') {
+    return checkStreamableHttpHealth(server, startTime);
+  } else if (server.type === 'http') {
     return checkHttpHealth(server, startTime);
   } else {
     return checkCommandHealth(server, startTime);
@@ -120,6 +123,91 @@ async function checkHttpHealth(server: CustomMcpServer, startTime: number): Prom
     if (response.ok) {
       status = 'healthy';
       message = 'Server is responding';
+    } else if (response.status === 401 || response.status === 403) {
+      status = 'needs_auth';
+      message = response.status === 401 ? 'Authentication required' : 'Access forbidden';
+    } else {
+      status = 'unhealthy';
+      message = `HTTP ${response.status}: ${response.statusText}`;
+    }
+
+    return {
+      serverId: server.id,
+      status,
+      statusCode: response.status,
+      message,
+      responseTime,
+      checkedAt: new Date().toISOString(),
+    };
+  } catch (error) {
+    const responseTime = Date.now() - startTime;
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+
+    // Check for specific error types
+    const status: McpHealthStatus = 'unhealthy';
+    let message = errorMessage;
+
+    if (errorMessage.includes('abort') || errorMessage.includes('timeout')) {
+      message = 'Connection timed out';
+    } else if (errorMessage.includes('ECONNREFUSED')) {
+      message = 'Connection refused - server may be down';
+    } else if (errorMessage.includes('ENOTFOUND')) {
+      message = 'Server not found - check URL';
+    }
+
+    return {
+      serverId: server.id,
+      status,
+      message,
+      responseTime,
+      checkedAt: new Date().toISOString(),
+    };
+  }
+}
+
+/**
+ * Check Streamable HTTP server health by making a request with proper MCP Accept header.
+ * Streamable HTTP servers (MCP spec 2025-03-26) support both JSON and SSE responses.
+ */
+async function checkStreamableHttpHealth(server: CustomMcpServer, startTime: number): Promise<McpHealthCheckResult> {
+  if (!server.url) {
+    return {
+      serverId: server.id,
+      status: 'unhealthy',
+      message: 'No URL configured',
+      checkedAt: new Date().toISOString(),
+    };
+  }
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+
+    // Streamable HTTP requires Accept header with both JSON and SSE support
+    const headers: Record<string, string> = {
+      'Accept': 'application/json, text/event-stream',
+    };
+
+    // Add custom headers if configured
+    if (server.headers) {
+      Object.assign(headers, server.headers);
+    }
+
+    const response = await fetch(server.url, {
+      method: 'GET',
+      headers,
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeout);
+    const responseTime = Date.now() - startTime;
+
+    let status: McpHealthStatus;
+    let message: string;
+
+    if (response.ok) {
+      status = 'healthy';
+      message = 'Streamable HTTP server is responding';
     } else if (response.status === 401 || response.status === 403) {
       status = 'needs_auth';
       message = response.status === 401 ? 'Authentication required' : 'Access forbidden';
@@ -247,7 +335,9 @@ async function checkCommandHealth(server: CustomMcpServer, startTime: number): P
 async function testMcpConnection(server: CustomMcpServer): Promise<McpTestConnectionResult> {
   const startTime = Date.now();
 
-  if (server.type === 'http') {
+  if (server.type === 'streamable-http') {
+    return testStreamableHttpConnection(server, startTime);
+  } else if (server.type === 'http') {
     return testHttpConnection(server, startTime);
   } else {
     return testCommandConnection(server, startTime);
@@ -361,6 +451,141 @@ async function testHttpConnection(server: CustomMcpServer, startTime: number): P
       serverId: server.id,
       success: true,
       message: tools.length > 0 ? `Connected successfully, ${tools.length} tools available` : 'Connected successfully',
+      tools,
+      responseTime,
+    };
+  } catch (error) {
+    const responseTime = Date.now() - startTime;
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+
+    let message = 'Connection failed';
+    if (errorMessage.includes('abort') || errorMessage.includes('timeout')) {
+      message = 'Connection timed out';
+    } else if (errorMessage.includes('ECONNREFUSED')) {
+      message = 'Connection refused - server may be down';
+    } else if (errorMessage.includes('ENOTFOUND')) {
+      message = 'Server not found - check URL';
+    }
+
+    return {
+      serverId: server.id,
+      success: false,
+      message,
+      error: errorMessage,
+      responseTime,
+    };
+  }
+}
+
+/**
+ * Test Streamable HTTP MCP server connection by sending an MCP initialize request.
+ * Uses MCP protocol version 2025-03-26 and proper Accept header for streaming support.
+ */
+async function testStreamableHttpConnection(server: CustomMcpServer, startTime: number): Promise<McpTestConnectionResult> {
+  if (!server.url) {
+    return {
+      serverId: server.id,
+      success: false,
+      message: 'No URL configured',
+    };
+  }
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+
+    // Streamable HTTP requires Accept header with both JSON and SSE support
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json, text/event-stream',
+    };
+
+    if (server.headers) {
+      Object.assign(headers, server.headers);
+    }
+
+    // Send MCP initialize request with Streamable HTTP protocol version
+    const initRequest = {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2025-03-26',
+        capabilities: {},
+        clientInfo: {
+          name: 'auto-claude-health-check',
+          version: '1.0.0',
+        },
+      },
+    };
+
+    const response = await fetch(server.url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(initRequest),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeout);
+    const responseTime = Date.now() - startTime;
+
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        return {
+          serverId: server.id,
+          success: false,
+          message: 'Authentication failed',
+          error: `HTTP ${response.status}: ${response.statusText}`,
+          responseTime,
+        };
+      }
+      return {
+        serverId: server.id,
+        success: false,
+        message: `Server returned error`,
+        error: `HTTP ${response.status}: ${response.statusText}`,
+        responseTime,
+      };
+    }
+
+    const data = await response.json();
+
+    if (data.error) {
+      return {
+        serverId: server.id,
+        success: false,
+        message: 'MCP error',
+        error: data.error.message || JSON.stringify(data.error),
+        responseTime,
+      };
+    }
+
+    // Now try to list tools
+    const toolsRequest = {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/list',
+      params: {},
+    };
+
+    const toolsResponse = await fetch(server.url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(toolsRequest),
+    });
+
+    let tools: string[] = [];
+    if (toolsResponse.ok) {
+      const toolsData = await toolsResponse.json();
+      if (toolsData.result?.tools) {
+        tools = toolsData.result.tools.map((t: { name: string }) => t.name);
+      }
+    }
+
+    return {
+      serverId: server.id,
+      success: true,
+      message: tools.length > 0 ? `Connected successfully, ${tools.length} tools available` : 'Connected successfully (Streamable HTTP)',
       tools,
       responseTime,
     };
