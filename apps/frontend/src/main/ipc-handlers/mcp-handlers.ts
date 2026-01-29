@@ -21,7 +21,6 @@ import { existsSync } from 'fs';
 import { app } from 'electron';
 import { appLog } from '../app-logger';
 import { isWindows } from '../platform';
-import { getMcpSessionStore } from '../mcp/session-store';
 import { parsePythonCommand } from '../python-detector';
 import { getConfiguredPythonPath, pythonEnvManager } from '../python-env-manager';
 
@@ -599,8 +598,6 @@ async function checkStreamableHttpHealth(
     };
   }
 
-  const sessionStore = getMcpSessionStore();
-
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10000); // 10 second timeout
@@ -610,10 +607,10 @@ async function checkStreamableHttpHealth(
       'Accept': 'application/json, text/event-stream',
     };
 
-    // Inject session ID if an active session exists for this server
-    const sessionId = sessionStore.getSessionId(server.url);
-    if (sessionId) {
-      headers['Mcp-Session-Id'] = sessionId;
+    // Inject session ID if an active session exists for this server (fetch from backend)
+    const backendSession = await getSessionFromBackend(server.url);
+    if (backendSession.session?.sessionId) {
+      headers['Mcp-Session-Id'] = backendSession.session.sessionId;
     }
 
     // Add custom headers if configured
@@ -647,13 +644,8 @@ async function checkStreamableHttpHealth(
         `MCP session error for ${server.id}: HTTP ${response.status} - ${response.status === 400 ? 'missing' : 'expired'} session, re-initializing`
       );
 
-      sessionStore.clearSession(server.url);
-      sessionStore.updateState(server.url, 'reconnecting');
-
       // Sync reconnecting state to backend (single source of truth)
-      syncSessionToBackend(server.url, null, 'reconnecting').catch((err) => {
-        appLog.debug(`Failed to sync reconnecting state to backend for ${server.id}:`, err);
-      });
+      await syncSessionToBackend(server.url, null, 'reconnecting');
 
       // Attempt to re-initialize the session
       const reinitResult = await reinitializeStreamableHttpSession(server, startTime);
@@ -719,8 +711,6 @@ async function reinitializeStreamableHttpSession(
     return { success: false, error: 'No URL configured' };
   }
 
-  const sessionStore = getMcpSessionStore();
-
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000); // 15 second timeout for initialization
@@ -762,12 +752,9 @@ async function reinitializeStreamableHttpSession(
 
     if (!response.ok) {
       const errorMsg = `Re-init failed: HTTP ${response.status}`;
-      sessionStore.updateState(server.url, 'error', errorMsg);
 
       // Sync error state to backend (single source of truth)
-      syncSessionToBackend(server.url, null, 'error', errorMsg).catch((err) => {
-        appLog.debug(`Failed to sync re-init HTTP error to backend for ${server.id}:`, err);
-      });
+      await syncSessionToBackend(server.url, null, 'error', errorMsg);
 
       return { success: false, error: `HTTP ${response.status}` };
     }
@@ -776,12 +763,9 @@ async function reinitializeStreamableHttpSession(
 
     if (data.error) {
       const errorMsg = 'MCP protocol error during re-init';
-      sessionStore.updateState(server.url, 'error', errorMsg);
 
       // Sync error state to backend (single source of truth)
-      syncSessionToBackend(server.url, null, 'error', errorMsg).catch((err) => {
-        appLog.debug(`Failed to sync re-init protocol error to backend for ${server.id}:`, err);
-      });
+      await syncSessionToBackend(server.url, null, 'error', errorMsg);
 
       return { success: false, error: 'MCP protocol error' };
     }
@@ -791,35 +775,26 @@ async function reinitializeStreamableHttpSession(
     const newSessionId = response.headers.get('Mcp-Session-Id');
 
     if (newSessionId) {
-      sessionStore.setSession(server.url, newSessionId, 'active');
       appLog.debug(`MCP session re-initialized for ${server.id} (new session established)`);
 
       // Sync new active session to backend (single source of truth)
-      syncSessionToBackend(server.url, newSessionId, 'active').catch((err) => {
-        appLog.debug(`Failed to sync re-initialized session to backend for ${server.id}:`, err);
-      });
+      await syncSessionToBackend(server.url, newSessionId, 'active');
 
       return { success: true, sessionId: newSessionId };
     } else {
       // Server didn't return a session ID - still mark as active
-      sessionStore.updateState(server.url, 'active');
       appLog.debug(`MCP re-initialized for ${server.id} (no session ID returned)`);
 
       // Sync active state to backend (without session ID)
-      syncSessionToBackend(server.url, null, 'active').catch((err) => {
-        appLog.debug(`Failed to sync re-initialized state to backend for ${server.id}:`, err);
-      });
+      await syncSessionToBackend(server.url, null, 'active');
 
       return { success: true };
     }
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    sessionStore.updateState(server.url, 'error', errorMessage);
 
     // Sync error state to backend (single source of truth)
-    syncSessionToBackend(server.url, null, 'error', errorMessage).catch((err) => {
-      appLog.debug(`Failed to sync re-init error state to backend for ${server.id}:`, err);
-    });
+    await syncSessionToBackend(server.url, null, 'error', errorMessage);
 
     return { success: false, error: errorMessage };
   }
@@ -1072,19 +1047,12 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
     };
   }
 
-  const sessionStore = getMcpSessionStore();
-
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 30000); // 30 second timeout
 
-    // Mark session as initializing
-    sessionStore.updateState(server.url, 'initializing');
-
     // Sync initializing state to backend (single source of truth)
-    syncSessionToBackend(server.url, null, 'initializing').catch((err) => {
-      appLog.debug(`Failed to sync initializing state to backend for ${server.id}:`, err);
-    });
+    await syncSessionToBackend(server.url, null, 'initializing');
 
     // Streamable HTTP requires Accept header with both JSON and SSE support
     const headers: Record<string, string> = {
@@ -1123,12 +1091,9 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
 
     if (!response.ok) {
       const errorMsg = `HTTP ${response.status}`;
-      sessionStore.updateState(server.url, 'error', errorMsg);
 
       // Sync error state to backend (single source of truth)
-      syncSessionToBackend(server.url, null, 'error', errorMsg).catch((err) => {
-        appLog.debug(`Failed to sync error state to backend for ${server.id}:`, err);
-      });
+      await syncSessionToBackend(server.url, null, 'error', errorMsg);
 
       if (response.status === 401 || response.status === 403) {
         return {
@@ -1149,12 +1114,8 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
     const data = await response.json();
 
     if (data.error) {
-      sessionStore.updateState(server.url, 'error', 'MCP protocol error');
-
       // Sync error state to backend (single source of truth)
-      syncSessionToBackend(server.url, null, 'error', 'MCP protocol error').catch((err) => {
-        appLog.debug(`Failed to sync protocol error state to backend for ${server.id}:`, err);
-      });
+      await syncSessionToBackend(server.url, null, 'error', 'MCP protocol error');
 
       return {
         serverId: server.id,
@@ -1170,22 +1131,16 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
 
     // Store session ID if present - this establishes an active session
     if (sessionId) {
-      sessionStore.setSession(server.url, sessionId, 'active');
       appLog.debug(`MCP session established for ${server.id} (session ID captured)`);
 
       // Sync active session to backend (single source of truth)
-      syncSessionToBackend(server.url, sessionId, 'active').catch((err) => {
-        appLog.debug(`Failed to sync active session to backend for ${server.id}:`, err);
-      });
+      await syncSessionToBackend(server.url, sessionId, 'active');
     } else {
       // Server didn't return a session ID - still mark as active but without session
-      sessionStore.updateState(server.url, 'active');
       appLog.debug(`MCP connection established for ${server.id} (no session ID returned)`);
 
       // Sync active state to backend (without session ID)
-      syncSessionToBackend(server.url, null, 'active').catch((err) => {
-        appLog.debug(`Failed to sync active state to backend for ${server.id}:`, err);
-      });
+      await syncSessionToBackend(server.url, null, 'active');
     }
 
     // Now try to list tools (with separate timeout)
@@ -1221,8 +1176,7 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
         if (toolsData.result?.tools) {
           tools = toolsData.result.tools.map((t: { name: string }) => t.name);
         }
-        // Increment request count for successful request
-        sessionStore.incrementRequestCount(server.url);
+        // Note: Request count is tracked by backend MCPSessionManager
       } else if (toolsResponse.status === 400 || toolsResponse.status === 404) {
         // HTTP 400: Missing session - session ID required but not provided
         // HTTP 404: Expired session - session ID no longer valid
@@ -1230,13 +1184,9 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
         appLog.debug(
           `MCP tools/list got ${toolsResponse.status} for ${server.id} - session may have expired immediately, clearing`
         );
-        sessionStore.clearSession(server.url);
-        sessionStore.updateState(server.url, 'reconnecting');
 
         // Sync reconnecting state to backend (single source of truth)
-        syncSessionToBackend(server.url, null, 'reconnecting').catch((err) => {
-          appLog.debug(`Failed to sync reconnecting state to backend for ${server.id}:`, err);
-        });
+        await syncSessionToBackend(server.url, null, 'reconnecting');
 
         // Re-initialize and retry tools/list once
         const reinitResult = await reinitializeStreamableHttpSession(server, startTime);
@@ -1263,7 +1213,7 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
               if (retryData.result?.tools) {
                 tools = retryData.result.tools.map((t: { name: string }) => t.name);
               }
-              sessionStore.incrementRequestCount(server.url);
+              // Note: Request count is tracked by backend MCPSessionManager
             }
           } catch (retryError) {
             clearTimeout(retryTimeout);
@@ -1293,12 +1243,8 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
     const responseTime = Date.now() - startTime;
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
-    sessionStore.updateState(server.url, 'error', errorMessage);
-
     // Sync error state to backend (single source of truth)
-    syncSessionToBackend(server.url, null, 'error', errorMessage).catch((err) => {
-      appLog.debug(`Failed to sync error state to backend for ${server.id}:`, err);
-    });
+    await syncSessionToBackend(server.url, null, 'error', errorMessage);
 
     return {
       serverId: server.id,
@@ -1473,17 +1419,10 @@ async function terminateMcpSession(
   serverUrl: string,
   headers?: Record<string, string>
 ): Promise<{ success: boolean; message: string; statusCode?: number }> {
-  const sessionStore = getMcpSessionStore();
-
   // Get session ID from backend (single source of truth) and mark as terminating
   const backendResult = await terminateSessionInBackend(serverUrl);
 
   if (!backendResult.success) {
-    // Backend couldn't initiate termination - check if we have a local session to clean up
-    const localSession = sessionStore.getSession(serverUrl);
-    if (localSession) {
-      sessionStore.clearSession(serverUrl);
-    }
     return {
       success: false,
       message: backendResult.message || 'No session exists for this server',
@@ -1493,8 +1432,6 @@ async function terminateMcpSession(
   const sessionId = backendResult.sessionId;
   if (!sessionId) {
     // No session ID - backend has already cleared the session
-    sessionStore.clearSession(serverUrl);
-
     // Notify backend termination is complete (no HTTP request needed)
     await notifyTerminationComplete(serverUrl, true);
 
@@ -1503,9 +1440,6 @@ async function terminateMcpSession(
       message: 'Session cleared (no session ID to terminate)',
     };
   }
-
-  // Also mark session as terminating in local store (will be removed in phase 6)
-  sessionStore.updateState(serverUrl, 'terminating');
 
   try {
     const controller = new AbortController();
@@ -1528,9 +1462,6 @@ async function terminateMcpSession(
     });
 
     clearTimeout(timeout);
-
-    // Mark termination complete in local store (will be removed in phase 6)
-    sessionStore.terminationComplete(serverUrl, response.ok, response.status);
 
     // Notify backend of termination result
     await notifyTerminationComplete(serverUrl, response.ok || response.status === 204 || response.status === 404, response.status);
@@ -1561,9 +1492,6 @@ async function terminateMcpSession(
     }
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-
-    // Still clear the session even if DELETE failed (best effort cleanup)
-    sessionStore.terminationComplete(serverUrl, false);
 
     // Notify backend of termination failure
     await notifyTerminationComplete(serverUrl, false);
