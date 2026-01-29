@@ -27,9 +27,8 @@ vi.mock('../../app-logger', () => ({
   appLog: vi.fn(),
 }));
 
-// Import the module under test after mocks are set up
-// We need to import the handlers dynamically to test internal functions
-// Since the functions are not exported, we'll test through the IPC handlers behavior
+// Import exported security functions directly from the module
+import { isCommandSafe, areArgsSafe, mapNetworkErrorToMessage } from '../mcp-handlers';
 
 describe('MCP Health Check Functions', () => {
   beforeEach(() => {
@@ -353,8 +352,7 @@ describe('MCP Health Check Functions', () => {
       const result = await testHttpConnection(server, Date.now());
 
       expect(result.success).toBe(false);
-      expect(result.message).toBe('MCP error');
-      expect(result.error).toBe('Invalid request');
+      expect(result.message).toBe('MCP protocol error');
     });
   });
 
@@ -506,9 +504,7 @@ describe('MCP Health Check Functions', () => {
   });
 
   describe('Command Security Validation', () => {
-    it('rejects commands not in allowlist', async () => {
-      const { isCommandSafe } = await importSecurityFunctions();
-
+    it('rejects commands not in allowlist', () => {
       expect(isCommandSafe('npx')).toBe(true);
       expect(isCommandSafe('npm')).toBe(true);
       expect(isCommandSafe('node')).toBe(true);
@@ -517,21 +513,37 @@ describe('MCP Health Check Functions', () => {
       expect(isCommandSafe('curl')).toBe(false);
     });
 
-    it('rejects commands with path separators', async () => {
-      const { isCommandSafe } = await importSecurityFunctions();
-
+    it('rejects commands with path separators', () => {
       expect(isCommandSafe('/usr/bin/npx')).toBe(false);
       expect(isCommandSafe('./malicious')).toBe(false);
       expect(isCommandSafe('C:\\Windows\\cmd.exe')).toBe(false);
     });
 
-    it('rejects dangerous interpreter flags', async () => {
-      const { areArgsSafe } = await importSecurityFunctions();
-
+    it('rejects dangerous interpreter flags', () => {
       expect(areArgsSafe(['--eval', 'code'])).toBe(false);
       expect(areArgsSafe(['-e', 'code'])).toBe(false);
       expect(areArgsSafe(['-c', 'code'])).toBe(false);
       expect(areArgsSafe(['-y', 'package-name'])).toBe(true);
+    });
+  });
+
+  describe('Error Message Mapping', () => {
+    it('maps timeout errors to user-friendly message', () => {
+      expect(mapNetworkErrorToMessage('The operation was aborted')).toBe('Connection timed out');
+      expect(mapNetworkErrorToMessage('timeout exceeded')).toBe('Connection timed out');
+    });
+
+    it('maps connection refused errors', () => {
+      expect(mapNetworkErrorToMessage('ECONNREFUSED')).toBe('Connection refused - server may be down');
+    });
+
+    it('maps not found errors', () => {
+      expect(mapNetworkErrorToMessage('ENOTFOUND')).toBe('Server not found - check URL');
+    });
+
+    it('returns generic message for unknown errors', () => {
+      expect(mapNetworkErrorToMessage('Some unknown error')).toBe('Connection failed');
+      expect(mapNetworkErrorToMessage('')).toBe('Connection failed');
     });
   });
 });
@@ -635,19 +647,10 @@ async function importHealthCheckFunctions() {
       const responseTime = Date.now() - startTime;
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
-      let message = errorMessage;
-      if (errorMessage.includes('abort') || errorMessage.includes('timeout')) {
-        message = 'Connection timed out';
-      } else if (errorMessage.includes('ECONNREFUSED')) {
-        message = 'Connection refused - server may be down';
-      } else if (errorMessage.includes('ENOTFOUND')) {
-        message = 'Server not found - check URL';
-      }
-
       return {
         serverId: server.id,
         status: 'unhealthy',
-        message,
+        message: mapNetworkErrorToMessage(errorMessage),
         responseTime,
         checkedAt: new Date().toISOString(),
       };
@@ -714,19 +717,10 @@ async function importHealthCheckFunctions() {
       const responseTime = Date.now() - startTime;
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
-      let message = errorMessage;
-      if (errorMessage.includes('abort') || errorMessage.includes('timeout')) {
-        message = 'Connection timed out';
-      } else if (errorMessage.includes('ECONNREFUSED')) {
-        message = 'Connection refused - server may be down';
-      } else if (errorMessage.includes('ENOTFOUND')) {
-        message = 'Server not found - check URL';
-      }
-
       return {
         serverId: server.id,
         status: 'unhealthy',
-        message,
+        message: mapNetworkErrorToMessage(errorMessage),
         responseTime,
         checkedAt: new Date().toISOString(),
       };
@@ -788,15 +782,13 @@ async function importHealthCheckFunctions() {
             serverId: server.id,
             success: false,
             message: 'Authentication failed',
-            error: `HTTP ${response.status}: ${response.statusText}`,
             responseTime,
           };
         }
         return {
           serverId: server.id,
           success: false,
-          message: 'Server returned error',
-          error: `HTTP ${response.status}: ${response.statusText}`,
+          message: `Server returned HTTP ${response.status}`,
           responseTime,
         };
       }
@@ -807,11 +799,14 @@ async function importHealthCheckFunctions() {
         return {
           serverId: server.id,
           success: false,
-          message: 'MCP error',
-          error: data.error.message || JSON.stringify(data.error),
+          message: 'MCP protocol error',
           responseTime,
         };
       }
+
+      // Now try to list tools (with separate timeout)
+      const toolsController = new AbortController();
+      const toolsTimeout = setTimeout(() => toolsController.abort(), 10000);
 
       const toolsRequest = {
         jsonrpc: '2.0',
@@ -820,18 +815,26 @@ async function importHealthCheckFunctions() {
         params: {},
       };
 
-      const toolsResponse = await fetch(server.url, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(toolsRequest),
-      });
-
       let tools: string[] = [];
-      if (toolsResponse.ok) {
-        const toolsData = await toolsResponse.json();
-        if (toolsData.result?.tools) {
-          tools = toolsData.result.tools.map((t: { name: string }) => t.name);
+      try {
+        const toolsResponse = await fetch(server.url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(toolsRequest),
+          signal: toolsController.signal,
+        });
+
+        clearTimeout(toolsTimeout);
+
+        if (toolsResponse.ok) {
+          const toolsData = await toolsResponse.json();
+          if (toolsData.result?.tools) {
+            tools = toolsData.result.tools.map((t: { name: string }) => t.name);
+          }
         }
+      } catch {
+        // Tools listing is optional - don't fail the connection test
+        clearTimeout(toolsTimeout);
       }
 
       return {
@@ -848,20 +851,10 @@ async function importHealthCheckFunctions() {
       const responseTime = Date.now() - startTime;
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
-      let message = 'Connection failed';
-      if (errorMessage.includes('abort') || errorMessage.includes('timeout')) {
-        message = 'Connection timed out';
-      } else if (errorMessage.includes('ECONNREFUSED')) {
-        message = 'Connection refused - server may be down';
-      } else if (errorMessage.includes('ENOTFOUND')) {
-        message = 'Server not found - check URL';
-      }
-
       return {
         serverId: server.id,
         success: false,
-        message,
-        error: errorMessage,
+        message: mapNetworkErrorToMessage(errorMessage),
         responseTime,
       };
     }
@@ -922,15 +915,13 @@ async function importHealthCheckFunctions() {
             serverId: server.id,
             success: false,
             message: 'Authentication failed',
-            error: `HTTP ${response.status}: ${response.statusText}`,
             responseTime,
           };
         }
         return {
           serverId: server.id,
           success: false,
-          message: 'Server returned error',
-          error: `HTTP ${response.status}: ${response.statusText}`,
+          message: `Server returned HTTP ${response.status}`,
           responseTime,
         };
       }
@@ -941,11 +932,14 @@ async function importHealthCheckFunctions() {
         return {
           serverId: server.id,
           success: false,
-          message: 'MCP error',
-          error: data.error.message || JSON.stringify(data.error),
+          message: 'MCP protocol error',
           responseTime,
         };
       }
+
+      // Now try to list tools (with separate timeout)
+      const toolsController = new AbortController();
+      const toolsTimeout = setTimeout(() => toolsController.abort(), 10000);
 
       const toolsRequest = {
         jsonrpc: '2.0',
@@ -954,18 +948,26 @@ async function importHealthCheckFunctions() {
         params: {},
       };
 
-      const toolsResponse = await fetch(server.url, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(toolsRequest),
-      });
-
       let tools: string[] = [];
-      if (toolsResponse.ok) {
-        const toolsData = await toolsResponse.json();
-        if (toolsData.result?.tools) {
-          tools = toolsData.result.tools.map((t: { name: string }) => t.name);
+      try {
+        const toolsResponse = await fetch(server.url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(toolsRequest),
+          signal: toolsController.signal,
+        });
+
+        clearTimeout(toolsTimeout);
+
+        if (toolsResponse.ok) {
+          const toolsData = await toolsResponse.json();
+          if (toolsData.result?.tools) {
+            tools = toolsData.result.tools.map((t: { name: string }) => t.name);
+          }
         }
+      } catch {
+        // Tools listing is optional - don't fail the connection test
+        clearTimeout(toolsTimeout);
       }
 
       return {
@@ -982,20 +984,10 @@ async function importHealthCheckFunctions() {
       const responseTime = Date.now() - startTime;
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
-      let message = 'Connection failed';
-      if (errorMessage.includes('abort') || errorMessage.includes('timeout')) {
-        message = 'Connection timed out';
-      } else if (errorMessage.includes('ECONNREFUSED')) {
-        message = 'Connection refused - server may be down';
-      } else if (errorMessage.includes('ENOTFOUND')) {
-        message = 'Server not found - check URL';
-      }
-
       return {
         serverId: server.id,
         success: false,
-        message,
-        error: errorMessage,
+        message: mapNetworkErrorToMessage(errorMessage),
         responseTime,
       };
     }
@@ -1009,37 +1001,3 @@ async function importHealthCheckFunctions() {
   };
 }
 
-/**
- * Helper to import security validation functions for testing.
- */
-async function importSecurityFunctions() {
-  const SAFE_COMMANDS = new Set(['npx', 'npm', 'node', 'python', 'python3', 'uv', 'uvx']);
-
-  const DANGEROUS_FLAGS = new Set([
-    '--eval',
-    '-e',
-    '-c',
-    '--exec',
-    '-m',
-    '-p',
-    '--print',
-    '--input-type=module',
-    '--experimental-loader',
-    '--require',
-    '-r',
-  ]);
-
-  function isCommandSafe(command: string | undefined): boolean {
-    if (!command) return false;
-    if (command.includes('/') || command.includes('\\')) return false;
-    return SAFE_COMMANDS.has(command);
-  }
-
-  function areArgsSafe(args: string[] | undefined): boolean {
-    if (!args || args.length === 0) return true;
-    if (args.some((arg) => DANGEROUS_FLAGS.has(arg))) return false;
-    return true;
-  }
-
-  return { isCommandSafe, areArgsSafe };
-}

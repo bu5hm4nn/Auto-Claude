@@ -39,7 +39,7 @@ const SHELL_METACHARACTERS = ['&', '|', '>', '<', '^', '%', ';', '$', '`', '\n',
 /**
  * Validate that a command is in the safe allowlist
  */
-function isCommandSafe(command: string | undefined): boolean {
+export function isCommandSafe(command: string | undefined): boolean {
   if (!command) return false;
   // Reject commands with paths (defense against path traversal)
   if (command.includes('/') || command.includes('\\')) return false;
@@ -49,7 +49,7 @@ function isCommandSafe(command: string | undefined): boolean {
 /**
  * Validate that args don't contain dangerous interpreter flags or shell metacharacters
  */
-function areArgsSafe(args: string[] | undefined): boolean {
+export function areArgsSafe(args: string[] | undefined): boolean {
   if (!args || args.length === 0) return true;
 
   // Check for dangerous interpreter flags
@@ -66,6 +66,21 @@ function areArgsSafe(args: string[] | undefined): boolean {
 }
 
 /**
+ * Map raw network error messages to user-friendly messages.
+ * This prevents exposing internal error details to users.
+ */
+export function mapNetworkErrorToMessage(errorMessage: string): string {
+  if (errorMessage.includes('abort') || errorMessage.includes('timeout')) {
+    return 'Connection timed out';
+  } else if (errorMessage.includes('ECONNREFUSED')) {
+    return 'Connection refused - server may be down';
+  } else if (errorMessage.includes('ENOTFOUND')) {
+    return 'Server not found - check URL';
+  }
+  return 'Connection failed';
+}
+
+/**
  * Quick health check for a custom MCP server.
  * For HTTP servers: makes a HEAD/GET request to check connectivity.
  * For Streamable HTTP servers: uses proper Accept header for MCP protocol.
@@ -78,8 +93,16 @@ async function checkMcpHealth(server: CustomMcpServer): Promise<McpHealthCheckRe
     return checkStreamableHttpHealth(server, startTime);
   } else if (server.type === 'http') {
     return checkHttpHealth(server, startTime);
-  } else {
+  } else if (server.type === 'command') {
     return checkCommandHealth(server, startTime);
+  } else {
+    // Explicit handling for unknown types
+    return {
+      serverId: server.id,
+      status: 'unhealthy',
+      message: `Unsupported server type: ${server.type}`,
+      checkedAt: new Date().toISOString(),
+    };
   }
 }
 
@@ -144,22 +167,10 @@ async function checkHttpHealth(server: CustomMcpServer, startTime: number): Prom
     const responseTime = Date.now() - startTime;
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
-    // Check for specific error types
-    const status: McpHealthStatus = 'unhealthy';
-    let message = errorMessage;
-
-    if (errorMessage.includes('abort') || errorMessage.includes('timeout')) {
-      message = 'Connection timed out';
-    } else if (errorMessage.includes('ECONNREFUSED')) {
-      message = 'Connection refused - server may be down';
-    } else if (errorMessage.includes('ENOTFOUND')) {
-      message = 'Server not found - check URL';
-    }
-
     return {
       serverId: server.id,
-      status,
-      message,
+      status: 'unhealthy',
+      message: mapNetworkErrorToMessage(errorMessage),
       responseTime,
       checkedAt: new Date().toISOString(),
     };
@@ -229,22 +240,10 @@ async function checkStreamableHttpHealth(server: CustomMcpServer, startTime: num
     const responseTime = Date.now() - startTime;
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
-    // Check for specific error types
-    const status: McpHealthStatus = 'unhealthy';
-    let message = errorMessage;
-
-    if (errorMessage.includes('abort') || errorMessage.includes('timeout')) {
-      message = 'Connection timed out';
-    } else if (errorMessage.includes('ECONNREFUSED')) {
-      message = 'Connection refused - server may be down';
-    } else if (errorMessage.includes('ENOTFOUND')) {
-      message = 'Server not found - check URL';
-    }
-
     return {
       serverId: server.id,
-      status,
-      message,
+      status: 'unhealthy',
+      message: mapNetworkErrorToMessage(errorMessage),
       responseTime,
       checkedAt: new Date().toISOString(),
     };
@@ -353,8 +352,15 @@ async function testMcpConnection(server: CustomMcpServer): Promise<McpTestConnec
     return testStreamableHttpConnection(server, startTime);
   } else if (server.type === 'http') {
     return testHttpConnection(server, startTime);
-  } else {
+  } else if (server.type === 'command') {
     return testCommandConnection(server, startTime);
+  } else {
+    // Explicit handling for unknown types
+    return {
+      serverId: server.id,
+      success: false,
+      message: `Unsupported server type: ${server.type}`,
+    };
   }
 }
 
@@ -414,15 +420,13 @@ async function testHttpConnection(server: CustomMcpServer, startTime: number): P
           serverId: server.id,
           success: false,
           message: 'Authentication failed',
-          error: `HTTP ${response.status}: ${response.statusText}`,
           responseTime,
         };
       }
       return {
         serverId: server.id,
         success: false,
-        message: `Server returned error`,
-        error: `HTTP ${response.status}: ${response.statusText}`,
+        message: `Server returned HTTP ${response.status}`,
         responseTime,
       };
     }
@@ -433,13 +437,15 @@ async function testHttpConnection(server: CustomMcpServer, startTime: number): P
       return {
         serverId: server.id,
         success: false,
-        message: 'MCP error',
-        error: data.error.message || JSON.stringify(data.error),
+        message: 'MCP protocol error',
         responseTime,
       };
     }
 
-    // Now try to list tools
+    // Now try to list tools (with separate timeout)
+    const toolsController = new AbortController();
+    const toolsTimeout = setTimeout(() => toolsController.abort(), 10000);
+
     const toolsRequest = {
       jsonrpc: '2.0',
       id: 2,
@@ -447,18 +453,26 @@ async function testHttpConnection(server: CustomMcpServer, startTime: number): P
       params: {},
     };
 
-    const toolsResponse = await fetch(server.url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(toolsRequest),
-    });
-
     let tools: string[] = [];
-    if (toolsResponse.ok) {
-      const toolsData = await toolsResponse.json();
-      if (toolsData.result?.tools) {
-        tools = toolsData.result.tools.map((t: { name: string }) => t.name);
+    try {
+      const toolsResponse = await fetch(server.url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(toolsRequest),
+        signal: toolsController.signal,
+      });
+
+      clearTimeout(toolsTimeout);
+
+      if (toolsResponse.ok) {
+        const toolsData = await toolsResponse.json();
+        if (toolsData.result?.tools) {
+          tools = toolsData.result.tools.map((t: { name: string }) => t.name);
+        }
       }
+    } catch {
+      // Tools listing is optional - don't fail the connection test
+      clearTimeout(toolsTimeout);
     }
 
     return {
@@ -472,20 +486,10 @@ async function testHttpConnection(server: CustomMcpServer, startTime: number): P
     const responseTime = Date.now() - startTime;
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
-    let message = 'Connection failed';
-    if (errorMessage.includes('abort') || errorMessage.includes('timeout')) {
-      message = 'Connection timed out';
-    } else if (errorMessage.includes('ECONNREFUSED')) {
-      message = 'Connection refused - server may be down';
-    } else if (errorMessage.includes('ENOTFOUND')) {
-      message = 'Server not found - check URL';
-    }
-
     return {
       serverId: server.id,
       success: false,
-      message,
-      error: errorMessage,
+      message: mapNetworkErrorToMessage(errorMessage),
       responseTime,
     };
   }
@@ -549,15 +553,13 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
           serverId: server.id,
           success: false,
           message: 'Authentication failed',
-          error: `HTTP ${response.status}: ${response.statusText}`,
           responseTime,
         };
       }
       return {
         serverId: server.id,
         success: false,
-        message: `Server returned error`,
-        error: `HTTP ${response.status}: ${response.statusText}`,
+        message: `Server returned HTTP ${response.status}`,
         responseTime,
       };
     }
@@ -568,13 +570,15 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
       return {
         serverId: server.id,
         success: false,
-        message: 'MCP error',
-        error: data.error.message || JSON.stringify(data.error),
+        message: 'MCP protocol error',
         responseTime,
       };
     }
 
-    // Now try to list tools
+    // Now try to list tools (with separate timeout)
+    const toolsController = new AbortController();
+    const toolsTimeout = setTimeout(() => toolsController.abort(), 10000);
+
     const toolsRequest = {
       jsonrpc: '2.0',
       id: 2,
@@ -582,18 +586,26 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
       params: {},
     };
 
-    const toolsResponse = await fetch(server.url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(toolsRequest),
-    });
-
     let tools: string[] = [];
-    if (toolsResponse.ok) {
-      const toolsData = await toolsResponse.json();
-      if (toolsData.result?.tools) {
-        tools = toolsData.result.tools.map((t: { name: string }) => t.name);
+    try {
+      const toolsResponse = await fetch(server.url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(toolsRequest),
+        signal: toolsController.signal,
+      });
+
+      clearTimeout(toolsTimeout);
+
+      if (toolsResponse.ok) {
+        const toolsData = await toolsResponse.json();
+        if (toolsData.result?.tools) {
+          tools = toolsData.result.tools.map((t: { name: string }) => t.name);
+        }
       }
+    } catch {
+      // Tools listing is optional - don't fail the connection test
+      clearTimeout(toolsTimeout);
     }
 
     return {
@@ -607,20 +619,10 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
     const responseTime = Date.now() - startTime;
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
-    let message = 'Connection failed';
-    if (errorMessage.includes('abort') || errorMessage.includes('timeout')) {
-      message = 'Connection timed out';
-    } else if (errorMessage.includes('ECONNREFUSED')) {
-      message = 'Connection refused - server may be down';
-    } else if (errorMessage.includes('ENOTFOUND')) {
-      message = 'Server not found - check URL';
-    }
-
     return {
       serverId: server.id,
       success: false,
-      message,
-      error: errorMessage,
+      message: mapNetworkErrorToMessage(errorMessage),
       responseTime,
     };
   }
