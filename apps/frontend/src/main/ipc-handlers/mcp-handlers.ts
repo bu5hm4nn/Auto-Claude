@@ -1049,6 +1049,11 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
     // Mark session as initializing
     sessionStore.updateState(server.url, 'initializing');
 
+    // Sync initializing state to backend (single source of truth)
+    syncSessionToBackend(server.url, null, 'initializing').catch((err) => {
+      appLog.debug(`Failed to sync initializing state to backend for ${server.id}:`, err);
+    });
+
     // Streamable HTTP requires Accept header with both JSON and SSE support
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -1085,7 +1090,14 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
     const responseTime = Date.now() - startTime;
 
     if (!response.ok) {
-      sessionStore.updateState(server.url, 'error', `HTTP ${response.status}`);
+      const errorMsg = `HTTP ${response.status}`;
+      sessionStore.updateState(server.url, 'error', errorMsg);
+
+      // Sync error state to backend (single source of truth)
+      syncSessionToBackend(server.url, null, 'error', errorMsg).catch((err) => {
+        appLog.debug(`Failed to sync error state to backend for ${server.id}:`, err);
+      });
+
       if (response.status === 401 || response.status === 403) {
         return {
           serverId: server.id,
@@ -1106,6 +1118,12 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
 
     if (data.error) {
       sessionStore.updateState(server.url, 'error', 'MCP protocol error');
+
+      // Sync error state to backend (single source of truth)
+      syncSessionToBackend(server.url, null, 'error', 'MCP protocol error').catch((err) => {
+        appLog.debug(`Failed to sync protocol error state to backend for ${server.id}:`, err);
+      });
+
       return {
         serverId: server.id,
         success: false,
@@ -1122,10 +1140,20 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
     if (sessionId) {
       sessionStore.setSession(server.url, sessionId, 'active');
       appLog.debug(`MCP session established for ${server.id} (session ID captured)`);
+
+      // Sync active session to backend (single source of truth)
+      syncSessionToBackend(server.url, sessionId, 'active').catch((err) => {
+        appLog.debug(`Failed to sync active session to backend for ${server.id}:`, err);
+      });
     } else {
       // Server didn't return a session ID - still mark as active but without session
       sessionStore.updateState(server.url, 'active');
       appLog.debug(`MCP connection established for ${server.id} (no session ID returned)`);
+
+      // Sync active state to backend (without session ID)
+      syncSessionToBackend(server.url, null, 'active').catch((err) => {
+        appLog.debug(`Failed to sync active state to backend for ${server.id}:`, err);
+      });
     }
 
     // Now try to list tools (with separate timeout)
@@ -1172,6 +1200,11 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
         );
         sessionStore.clearSession(server.url);
         sessionStore.updateState(server.url, 'reconnecting');
+
+        // Sync reconnecting state to backend (single source of truth)
+        syncSessionToBackend(server.url, null, 'reconnecting').catch((err) => {
+          appLog.debug(`Failed to sync reconnecting state to backend for ${server.id}:`, err);
+        });
 
         // Re-initialize and retry tools/list once
         const reinitResult = await reinitializeStreamableHttpSession(server, startTime);
@@ -1229,6 +1262,11 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
     sessionStore.updateState(server.url, 'error', errorMessage);
+
+    // Sync error state to backend (single source of truth)
+    syncSessionToBackend(server.url, null, 'error', errorMessage).catch((err) => {
+      appLog.debug(`Failed to sync error state to backend for ${server.id}:`, err);
+    });
 
     return {
       serverId: server.id,
