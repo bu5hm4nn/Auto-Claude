@@ -441,6 +441,85 @@ export interface McpTestConnectionResult {
   responseTime?: number;
 }
 
+// ============================================
+// MCP Session Types (Streamable HTTP Protocol)
+// ============================================
+
+/**
+ * MCP session lifecycle state.
+ * Sessions are established via InitializeResponse and maintained via Mcp-Session-Id header.
+ */
+export type McpSessionState =
+  | 'disconnected'    // No session established
+  | 'initializing'    // Initialization in progress
+  | 'active'          // Session established and active
+  | 'reconnecting'    // Re-initializing after 400/404 error
+  | 'terminating'     // Sending DELETE to terminate session
+  | 'error';          // Session in error state
+
+/**
+ * MCP session information for a single Streamable HTTP server.
+ * Sessions are ephemeral (not persisted to disk) and stored per server URL.
+ */
+export interface McpSession {
+  /** Unique server URL (used as key in session store) */
+  serverUrl: string;
+  /** Session ID from Mcp-Session-Id response header (ASCII printable, globally unique) */
+  sessionId: string | null;
+  /** Current session lifecycle state */
+  state: McpSessionState;
+  /** Timestamp when session was established (ISO 8601) */
+  establishedAt: string | null;
+  /** Last activity timestamp (ISO 8601) */
+  lastActivityAt: string | null;
+  /** Number of successful requests made with this session */
+  requestCount: number;
+  /** Number of times session was re-initialized (after 400/404 errors) */
+  reinitializeCount: number;
+  /** Last error message (if state is 'error') */
+  lastError?: string;
+}
+
+/**
+ * Summary status of an MCP session for display in UI.
+ */
+export interface McpSessionStatus {
+  /** Server URL */
+  serverUrl: string;
+  /** Server display name (from custom MCP config) */
+  serverName?: string;
+  /** Whether session is currently active */
+  isActive: boolean;
+  /** Current session state */
+  state: McpSessionState;
+  /** Human-readable status message */
+  statusMessage: string;
+  /** Session duration in seconds (if active) */
+  durationSeconds?: number;
+  /** Number of requests made in this session */
+  requestCount: number;
+}
+
+/**
+ * Result of terminating an MCP session.
+ */
+export interface McpSessionTerminateResult {
+  /** Server URL */
+  serverUrl: string;
+  /** Whether termination was successful */
+  success: boolean;
+  /** Human-readable message */
+  message: string;
+  /** HTTP status code from DELETE request (if applicable) */
+  statusCode?: number;
+}
+
+/**
+ * Map of server URLs to their active sessions.
+ * Used internally by the session store.
+ */
+export type McpSessionMap = Map<string, McpSession>;
+
 // Auto Claude Initialization Types
 export interface AutoBuildVersionInfo {
   isInitialized: boolean;
