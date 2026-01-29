@@ -387,7 +387,7 @@ export interface CustomMcpServer {
   /** Display name shown in UI */
   name: string;
   /** Server type */
-  type: 'command' | 'http';
+  type: 'command' | 'http' | 'streamable-http';
   /** Command to execute (for type: 'command'). e.g., 'npx', 'npm', 'node' */
   command?: string;
   /** Arguments for the command (for type: 'command'). e.g., ['-y', 'my-mcp-server'] */
