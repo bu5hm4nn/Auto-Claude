@@ -1614,12 +1614,18 @@ export function registerMcpHandlers(): void {
     }
   );
 
-  // Get all active sessions
+  // Get all active sessions (queries backend as single source of truth)
   ipcMain.handle(IPC_CHANNELS.MCP_SESSION_GET_ALL, async () => {
     try {
-      const sessionStore = getMcpSessionStore();
-      const sessions = sessionStore.getAllSessions();
-      return { success: true, data: sessions };
+      // Fetch all sessions from backend MCPSessionManager
+      const result = await getAllSessionsFromBackend();
+      if (result.success) {
+        return { success: true, data: result.sessions };
+      }
+      return {
+        success: false,
+        error: result.error || 'Failed to get sessions from backend',
+      };
     } catch (error) {
       appLog.error('MCP get all sessions error:', error);
       return {
