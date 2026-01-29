@@ -140,3 +140,119 @@ def handle_mcp_session_set(data: dict[str, Any]) -> dict[str, Any]:
             "message": f"Failed to update session: {str(e)}",
             "session": None,
         }
+
+
+def handle_mcp_session_get(data: dict[str, Any]) -> dict[str, Any]:
+    """
+    Handle mcp:session:get message from frontend.
+
+    Retrieves session state for a specific server URL from the backend
+    MCPSessionManager.
+
+    Args:
+        data: Message data containing:
+            - server_url (str): The URL of the MCP server
+
+    Returns:
+        Response dict with:
+            - success (bool): Whether the operation succeeded
+            - message (str): Description of the result
+            - session (dict | None): Session data (masked) or None if not found
+
+    Example:
+        >>> handle_mcp_session_get({
+        ...     "server_url": "http://localhost:3000/mcp"
+        ... })
+        {'success': True, 'message': 'Session retrieved', 'session': {...}}
+    """
+    # Validate required fields
+    server_url = data.get("server_url")
+    if not server_url:
+        logger.warning("mcp:session:get missing server_url")
+        return {
+            "success": False,
+            "message": "Missing required field: server_url",
+            "session": None,
+        }
+
+    # Get the session manager singleton
+    manager = get_mcp_session_manager()
+
+    try:
+        session = manager.get_session(server_url)
+        session_dict = session.to_dict() if session else None
+
+        if session:
+            logger.debug("mcp:session:get success for %s", server_url)
+            return {
+                "success": True,
+                "message": "Session retrieved",
+                "session": session_dict,
+            }
+        else:
+            logger.debug("mcp:session:get no session for %s", server_url)
+            return {
+                "success": True,
+                "message": "No session exists for this server",
+                "session": None,
+            }
+
+    except Exception as e:
+        logger.error(
+            "mcp:session:get error for %s: %s",
+            server_url,
+            str(e),
+            exc_info=True,
+        )
+        return {
+            "success": False,
+            "message": f"Failed to get session: {str(e)}",
+            "session": None,
+        }
+
+
+def handle_mcp_session_get_all(data: dict[str, Any]) -> dict[str, Any]:
+    """
+    Handle mcp:session:getAll message from frontend.
+
+    Retrieves all session states from the backend MCPSessionManager.
+
+    Args:
+        data: Message data (no required fields)
+
+    Returns:
+        Response dict with:
+            - success (bool): Whether the operation succeeded
+            - message (str): Description of the result
+            - sessions (list[dict]): List of session data (masked)
+
+    Example:
+        >>> handle_mcp_session_get_all({})
+        {'success': True, 'message': 'Retrieved 2 sessions', 'sessions': [...]}
+    """
+    # Get the session manager singleton
+    manager = get_mcp_session_manager()
+
+    try:
+        sessions = manager.get_all_sessions()
+        sessions_list = [session.to_dict() for session in sessions]
+
+        logger.debug("mcp:session:getAll retrieved %d sessions", len(sessions_list))
+
+        return {
+            "success": True,
+            "message": f"Retrieved {len(sessions_list)} sessions",
+            "sessions": sessions_list,
+        }
+
+    except Exception as e:
+        logger.error(
+            "mcp:session:getAll error: %s",
+            str(e),
+            exc_info=True,
+        )
+        return {
+            "success": False,
+            "message": f"Failed to get sessions: {str(e)}",
+            "sessions": [],
+        }
