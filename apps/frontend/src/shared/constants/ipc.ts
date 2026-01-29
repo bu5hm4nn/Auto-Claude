@@ -544,6 +544,14 @@ export const IPC_CHANNELS = {
   MCP_CHECK_HEALTH: 'mcp:checkHealth',           // Quick connectivity check
   MCP_TEST_CONNECTION: 'mcp:testConnection',     // Full MCP protocol test
 
+  // MCP Session management (per-terminal session lifecycle)
+  MCP_SESSION_GET_STATUS: 'mcp:session:getStatus',     // Get session status for a terminal
+  MCP_SESSION_GET_ALL: 'mcp:session:getAll',           // Get all active sessions
+  MCP_SESSION_TERMINATE: 'mcp:session:terminate',      // Terminate session for a terminal
+
+  // MCP Session events (main -> renderer)
+  MCP_SESSION_STATE_CHANGED: 'mcp:session:stateChanged',  // Session state changed (connected/disconnected/error)
+
   // Sentry error reporting
   SENTRY_STATE_CHANGED: 'sentry:state-changed',  // Notify main process when setting changes
   GET_SENTRY_DSN: 'sentry:get-dsn',              // Get DSN from main process (env var)
