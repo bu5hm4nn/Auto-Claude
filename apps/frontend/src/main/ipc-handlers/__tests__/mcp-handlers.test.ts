@@ -12,10 +12,14 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 const mockFetch = vi.fn();
 vi.stubGlobal('fetch', mockFetch);
 
-// Mock spawn for command health checks
-vi.mock('child_process', () => ({
-  spawn: vi.fn(),
-}));
+// Mock spawn for command health checks (use importOriginal to keep other exports like execFile)
+vi.mock('child_process', async (importOriginal) => {
+  const actual = await importOriginal() as typeof import('child_process');
+  return {
+    ...actual,
+    spawn: vi.fn(),
+  };
+});
 
 // Mock platform detection
 vi.mock('../../platform', () => ({
@@ -30,7 +34,9 @@ vi.mock('../../app-logger', () => ({
   },
 }));
 
-// Mock session store
+// Mock session store for test helper functions
+// NOTE: The actual mcp-handlers.ts now communicates with the backend for session management
+// This mock is only used by the test helper implementations below (importSessionFunctions)
 const mockSessionStore = {
   getSessionId: vi.fn(),
   getSession: vi.fn(),
@@ -42,11 +48,6 @@ const mockSessionStore = {
   getSessionStatus: vi.fn(),
   getAllSessions: vi.fn(),
 };
-
-vi.mock('../../mcp/session-store', () => ({
-  getMcpSessionStore: () => mockSessionStore,
-  resetMcpSessionStore: vi.fn(),
-}));
 
 // Import exported security functions directly from the module
 import { isCommandSafe, areArgsSafe, mapNetworkErrorToMessage } from '../mcp-handlers';
