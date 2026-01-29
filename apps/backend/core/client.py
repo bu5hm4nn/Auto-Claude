@@ -178,7 +178,8 @@ def _validate_custom_mcp_server(server: dict) -> bool:
     if not isinstance(server.get("name"), str) or not server["name"]:
         return False
     # FIX: Changed from ('command', 'url') to ('command', 'http') to match actual usage
-    if server.get("type") not in ("command", "http"):
+    # Added 'streamable-http' for MCP 2025-03-26 streamable HTTP transport support
+    if server.get("type") not in ("command", "http", "streamable-http"):
         logger.warning(f"Invalid MCP server type: {server.get('type')}")
         return False
 
@@ -272,9 +273,9 @@ def _validate_custom_mcp_server(server: dict) -> bool:
                         f"Interpreter code execution flags are not allowed."
                     )
                     return False
-    elif server["type"] == "http":
+    elif server["type"] in ("http", "streamable-http"):
         if not isinstance(server.get("url"), str) or not server["url"]:
-            logger.warning("HTTP-type MCP server missing 'url' field")
+            logger.warning(f"{server['type'].upper()}-type MCP server missing 'url' field")
             return False
         # Validate headers is a dict of strings if present
         if "headers" in server:
