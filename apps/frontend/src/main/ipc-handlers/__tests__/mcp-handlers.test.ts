@@ -4,6 +4,10 @@
  *
  * Tests for MCP server health check and connection test functions.
  * Covers HTTP, Streamable HTTP, and command-based server types.
+ *
+ * The actual mcp-handlers.ts communicates with the backend MCPSessionManager
+ * for session management. These tests mock the backend IPC communication
+ * to verify correct behavior without requiring the Python backend.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -34,19 +38,159 @@ vi.mock('../../app-logger', () => ({
   },
 }));
 
-// Mock session store for test helper functions
-// NOTE: The actual mcp-handlers.ts now communicates with the backend for session management
-// This mock is only used by the test helper implementations below (importSessionFunctions)
-const mockSessionStore = {
-  getSessionId: vi.fn(),
-  getSession: vi.fn(),
-  setSession: vi.fn(),
-  updateState: vi.fn(),
-  clearSession: vi.fn(),
-  incrementRequestCount: vi.fn(),
-  terminationComplete: vi.fn(),
-  getSessionStatus: vi.fn(),
-  getAllSessions: vi.fn(),
+/**
+ * Mock backend IPC communication for session management.
+ * The actual mcp-handlers.ts uses executeBackendSessionIpc() to communicate
+ * with the Python backend MCPSessionManager. These mocks simulate backend responses.
+ */
+const mockBackendIpc = {
+  /**
+   * Mock storage for session data - simulates backend MCPSessionManager state
+   */
+  sessions: new Map<string, {
+    serverUrl: string;
+    sessionId: string | null;
+    state: string;
+    establishedAt: string | null;
+    lastActivityAt: string | null;
+    requestCount: number;
+    reinitializeCount: number;
+    lastError?: string;
+  }>(),
+
+  /**
+   * Set session state in mock backend (mcp:session:set)
+   */
+  setSession: vi.fn((serverUrl: string, sessionId: string | null, state: string, error?: string) => {
+    const existing = mockBackendIpc.sessions.get(serverUrl);
+    const session = {
+      serverUrl,
+      sessionId,
+      state,
+      establishedAt: state === 'active' ? new Date().toISOString() : (existing?.establishedAt ?? null),
+      lastActivityAt: new Date().toISOString(),
+      requestCount: existing?.requestCount ?? 0,
+      reinitializeCount: state === 'reconnecting' ? (existing?.reinitializeCount ?? 0) + 1 : (existing?.reinitializeCount ?? 0),
+      lastError: error,
+    };
+    mockBackendIpc.sessions.set(serverUrl, session);
+    return session;
+  }),
+
+  /**
+   * Get session from mock backend (mcp:session:get)
+   */
+  getSession: vi.fn((serverUrl: string) => {
+    return mockBackendIpc.sessions.get(serverUrl) ?? null;
+  }),
+
+  /**
+   * Get session ID from mock backend (helper for health checks)
+   */
+  getSessionId: vi.fn((serverUrl: string) => {
+    const session = mockBackendIpc.sessions.get(serverUrl);
+    return session?.sessionId ?? null;
+  }),
+
+  /**
+   * Get all sessions from mock backend (mcp:session:getAll)
+   */
+  getAllSessions: vi.fn(() => {
+    return Array.from(mockBackendIpc.sessions.values());
+  }),
+
+  /**
+   * Update session state in mock backend (mcp:session:set without session ID)
+   */
+  updateState: vi.fn((serverUrl: string, state: string, error?: string) => {
+    const existing = mockBackendIpc.sessions.get(serverUrl);
+    if (existing) {
+      existing.state = state;
+      existing.lastActivityAt = new Date().toISOString();
+      if (error) {
+        existing.lastError = error;
+      }
+      if (state === 'reconnecting') {
+        existing.reinitializeCount++;
+      }
+    } else {
+      // Create new session without session ID
+      mockBackendIpc.sessions.set(serverUrl, {
+        serverUrl,
+        sessionId: null,
+        state,
+        establishedAt: null,
+        lastActivityAt: new Date().toISOString(),
+        requestCount: 0,
+        reinitializeCount: state === 'reconnecting' ? 1 : 0,
+        lastError: error,
+      });
+    }
+  }),
+
+  /**
+   * Clear session in mock backend
+   */
+  clearSession: vi.fn((serverUrl: string) => {
+    mockBackendIpc.sessions.delete(serverUrl);
+  }),
+
+  /**
+   * Increment request count in mock backend
+   */
+  incrementRequestCount: vi.fn((serverUrl: string) => {
+    const session = mockBackendIpc.sessions.get(serverUrl);
+    if (session) {
+      session.requestCount++;
+      session.lastActivityAt = new Date().toISOString();
+    }
+  }),
+
+  /**
+   * Mark termination complete in mock backend
+   */
+  terminationComplete: vi.fn((serverUrl: string, success: boolean, statusCode?: number) => {
+    mockBackendIpc.sessions.delete(serverUrl);
+  }),
+
+  /**
+   * Get session status from mock backend
+   */
+  getSessionStatus: vi.fn((serverUrl: string) => {
+    const session = mockBackendIpc.sessions.get(serverUrl);
+    if (!session) {
+      return {
+        serverUrl,
+        isActive: false,
+        state: 'disconnected',
+        statusMessage: 'No session',
+        requestCount: 0,
+      };
+    }
+    return {
+      serverUrl,
+      isActive: session.state === 'active',
+      state: session.state,
+      statusMessage: session.state === 'active' ? `Active (${session.requestCount} requests)` : session.state,
+      requestCount: session.requestCount,
+    };
+  }),
+
+  /**
+   * Reset all mock state
+   */
+  reset: () => {
+    mockBackendIpc.sessions.clear();
+    mockBackendIpc.setSession.mockClear();
+    mockBackendIpc.updateState.mockClear();
+    mockBackendIpc.getSession.mockClear();
+    mockBackendIpc.getSessionId.mockClear();
+    mockBackendIpc.getAllSessions.mockClear();
+    mockBackendIpc.clearSession.mockClear();
+    mockBackendIpc.incrementRequestCount.mockClear();
+    mockBackendIpc.terminationComplete.mockClear();
+    mockBackendIpc.getSessionStatus.mockClear();
+  },
 };
 
 // Import exported security functions directly from the module
@@ -56,9 +200,8 @@ describe('MCP Health Check Functions', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useFakeTimers();
-    // Reset session store mock
-    mockSessionStore.getSessionId.mockReturnValue(null);
-    mockSessionStore.getSession.mockReturnValue(undefined);
+    // Reset backend IPC mock - the backend is now the single source of truth for session state
+    mockBackendIpc.reset();
   });
 
   afterEach(() => {
@@ -572,8 +715,8 @@ describe('MCP Health Check Functions', () => {
     });
   });
 
-  describe('MCP Session Capture', () => {
-    it('captures session ID from initialize response headers', async () => {
+  describe('MCP Session Capture (syncs to backend)', () => {
+    it('captures session ID from initialize response and syncs to backend', async () => {
       const mockHeaders = new Map([['mcp-session-id', 'test-session-12345']]);
       mockFetch
         .mockResolvedValueOnce({
@@ -601,7 +744,7 @@ describe('MCP Health Check Functions', () => {
       const result = await testStreamableHttpConnectionWithSession(server, Date.now());
 
       expect(result.success).toBe(true);
-      expect(mockSessionStore.setSession).toHaveBeenCalledWith(
+      expect(mockBackendIpc.setSession).toHaveBeenCalledWith(
         'https://example.com/mcp/stream',
         'test-session-12345',
         'active'
@@ -640,10 +783,10 @@ describe('MCP Health Check Functions', () => {
 
       await testStreamableHttpConnectionWithSession(server, Date.now());
 
-      expect(mockSessionStore.setSession).toHaveBeenCalled();
+      expect(mockBackendIpc.setSession).toHaveBeenCalled();
     });
 
-    it('marks session as active even when no session ID returned', async () => {
+    it('syncs active state to backend even when no session ID returned', async () => {
       mockFetch
         .mockResolvedValueOnce({
           ok: true,
@@ -670,13 +813,13 @@ describe('MCP Health Check Functions', () => {
       const result = await testStreamableHttpConnectionWithSession(server, Date.now());
 
       expect(result.success).toBe(true);
-      expect(mockSessionStore.updateState).toHaveBeenCalledWith(
+      expect(mockBackendIpc.updateState).toHaveBeenCalledWith(
         'https://example.com/mcp/stream',
         'active'
       );
     });
 
-    it('updates session state to initializing before connection', async () => {
+    it('syncs initializing state to backend before connection', async () => {
       mockFetch
         .mockResolvedValueOnce({
           ok: true,
@@ -701,7 +844,7 @@ describe('MCP Health Check Functions', () => {
       await testStreamableHttpConnectionWithSession(server, Date.now());
 
       // First call should be to mark as initializing
-      expect(mockSessionStore.updateState).toHaveBeenNthCalledWith(
+      expect(mockBackendIpc.updateState).toHaveBeenNthCalledWith(
         1,
         'https://example.com/mcp',
         'initializing'
@@ -709,9 +852,9 @@ describe('MCP Health Check Functions', () => {
     });
   });
 
-  describe('MCP Session Injection', () => {
-    it('injects session ID into health check request headers', async () => {
-      mockSessionStore.getSessionId.mockReturnValue('active-session-123');
+  describe('MCP Session Injection (fetches from backend)', () => {
+    it('fetches session ID from backend and injects into health check request headers', async () => {
+      mockBackendIpc.getSessionId.mockReturnValue('active-session-123');
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -739,8 +882,8 @@ describe('MCP Health Check Functions', () => {
       );
     });
 
-    it('does not inject session ID when no active session exists', async () => {
-      mockSessionStore.getSessionId.mockReturnValue(null);
+    it('does not inject session ID when backend returns no active session', async () => {
+      mockBackendIpc.getSessionId.mockReturnValue(null);
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -817,14 +960,14 @@ describe('MCP Health Check Functions', () => {
 
       await testStreamableHttpConnectionWithSession(server, Date.now());
 
-      expect(mockSessionStore.incrementRequestCount).toHaveBeenCalledWith(
+      expect(mockBackendIpc.incrementRequestCount).toHaveBeenCalledWith(
         'https://example.com/mcp/stream'
       );
     });
   });
 
-  describe('MCP Session Error Handling', () => {
-    it('clears session and triggers re-initialization on HTTP 400 (missing session)', async () => {
+  describe('MCP Session Error Handling (backend state management)', () => {
+    it('syncs reconnecting state to backend and triggers re-initialization on HTTP 400 (missing session)', async () => {
       // First health check returns 400 (missing session)
       mockFetch
         .mockResolvedValueOnce({
@@ -857,15 +1000,15 @@ describe('MCP Health Check Functions', () => {
       await checkStreamableHttpHealthWithSession(server, Date.now());
 
       // Should clear session on 400
-      expect(mockSessionStore.clearSession).toHaveBeenCalledWith('https://example.com/mcp/stream');
+      expect(mockBackendIpc.clearSession).toHaveBeenCalledWith('https://example.com/mcp/stream');
       // Should mark as reconnecting
-      expect(mockSessionStore.updateState).toHaveBeenCalledWith(
+      expect(mockBackendIpc.updateState).toHaveBeenCalledWith(
         'https://example.com/mcp/stream',
         'reconnecting'
       );
     });
 
-    it('clears session and triggers re-initialization on HTTP 404 (expired session)', async () => {
+    it('syncs reconnecting state to backend and triggers re-initialization on HTTP 404 (expired session)', async () => {
       // First health check returns 404 (expired session)
       mockFetch
         .mockResolvedValueOnce({
@@ -898,7 +1041,7 @@ describe('MCP Health Check Functions', () => {
       await checkStreamableHttpHealthWithSession(server, Date.now());
 
       // Should clear session on 404
-      expect(mockSessionStore.clearSession).toHaveBeenCalledWith('https://example.com/mcp/stream');
+      expect(mockBackendIpc.clearSession).toHaveBeenCalledWith('https://example.com/mcp/stream');
     });
 
     it('returns unhealthy status when re-initialization fails', async () => {
@@ -951,10 +1094,10 @@ describe('MCP Health Check Functions', () => {
       // Should return unhealthy directly without retry
       expect(result.status).toBe('unhealthy');
       // clearSession should not be called for retry
-      expect(mockSessionStore.clearSession).not.toHaveBeenCalled();
+      expect(mockBackendIpc.clearSession).not.toHaveBeenCalled();
     });
 
-    it('updates session state to error on connection failure', async () => {
+    it('syncs error state to backend on connection failure', async () => {
       mockFetch.mockRejectedValueOnce(new Error('ECONNREFUSED'));
 
       const { testStreamableHttpConnectionWithSession } = await importSessionFunctions();
@@ -967,14 +1110,14 @@ describe('MCP Health Check Functions', () => {
 
       await testStreamableHttpConnectionWithSession(server, Date.now());
 
-      expect(mockSessionStore.updateState).toHaveBeenCalledWith(
+      expect(mockBackendIpc.updateState).toHaveBeenCalledWith(
         'https://example.com/mcp/stream',
         'error',
         'ECONNREFUSED'
       );
     });
 
-    it('updates session state to error on HTTP error response', async () => {
+    it('syncs error state to backend on HTTP error response', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: false,
         status: 500,
@@ -991,7 +1134,7 @@ describe('MCP Health Check Functions', () => {
 
       await testStreamableHttpConnectionWithSession(server, Date.now());
 
-      expect(mockSessionStore.updateState).toHaveBeenCalledWith(
+      expect(mockBackendIpc.updateState).toHaveBeenCalledWith(
         'https://example.com/mcp/stream',
         'error',
         'HTTP 500'
@@ -1043,9 +1186,9 @@ describe('MCP Health Check Functions', () => {
     });
   });
 
-  describe('MCP Session Termination', () => {
-    it('sends HTTP DELETE with session ID header', async () => {
-      mockSessionStore.getSession.mockReturnValue({
+  describe('MCP Session Termination (coordinates with backend)', () => {
+    it('fetches session ID from backend and sends HTTP DELETE with session ID header', async () => {
+      mockBackendIpc.getSession.mockReturnValue({
         serverUrl: 'https://example.com/mcp/stream',
         sessionId: 'terminate-session-123',
         state: 'active',
@@ -1072,8 +1215,8 @@ describe('MCP Health Check Functions', () => {
       expect(result.success).toBe(true);
     });
 
-    it('returns failure when no session exists', async () => {
-      mockSessionStore.getSession.mockReturnValue(undefined);
+    it('returns failure when backend reports no session exists', async () => {
+      mockBackendIpc.getSession.mockReturnValue(undefined);
 
       const { terminateSession } = await importSessionFunctions();
 
@@ -1084,8 +1227,8 @@ describe('MCP Health Check Functions', () => {
       expect(mockFetch).not.toHaveBeenCalled();
     });
 
-    it('clears session when no session ID present', async () => {
-      mockSessionStore.getSession.mockReturnValue({
+    it('clears session in backend when no session ID present', async () => {
+      mockBackendIpc.getSession.mockReturnValue({
         serverUrl: 'https://example.com/mcp/stream',
         sessionId: null,
         state: 'active',
@@ -1097,11 +1240,11 @@ describe('MCP Health Check Functions', () => {
 
       expect(result.success).toBe(true);
       expect(result.message).toBe('Session cleared (no session ID to terminate)');
-      expect(mockSessionStore.clearSession).toHaveBeenCalledWith('https://example.com/mcp/stream');
+      expect(mockBackendIpc.clearSession).toHaveBeenCalledWith('https://example.com/mcp/stream');
     });
 
-    it('marks session as terminating before sending DELETE', async () => {
-      mockSessionStore.getSession.mockReturnValue({
+    it('syncs terminating state to backend before sending DELETE', async () => {
+      mockBackendIpc.getSession.mockReturnValue({
         serverUrl: 'https://example.com/mcp/stream',
         sessionId: 'session-456',
         state: 'active',
@@ -1116,14 +1259,14 @@ describe('MCP Health Check Functions', () => {
 
       await terminateSession('https://example.com/mcp/stream');
 
-      expect(mockSessionStore.updateState).toHaveBeenCalledWith(
+      expect(mockBackendIpc.updateState).toHaveBeenCalledWith(
         'https://example.com/mcp/stream',
         'terminating'
       );
     });
 
     it('treats HTTP 404 as successful termination (session already expired)', async () => {
-      mockSessionStore.getSession.mockReturnValue({
+      mockBackendIpc.getSession.mockReturnValue({
         serverUrl: 'https://example.com/mcp/stream',
         sessionId: 'expired-session',
         state: 'active',
@@ -1143,8 +1286,8 @@ describe('MCP Health Check Functions', () => {
       expect(result.message).toBe('Session already expired or terminated');
     });
 
-    it('calls terminationComplete on session store after DELETE', async () => {
-      mockSessionStore.getSession.mockReturnValue({
+    it('notifies backend of termination completion after DELETE', async () => {
+      mockBackendIpc.getSession.mockReturnValue({
         serverUrl: 'https://example.com/mcp/stream',
         sessionId: 'session-xyz',
         state: 'active',
@@ -1159,7 +1302,7 @@ describe('MCP Health Check Functions', () => {
 
       await terminateSession('https://example.com/mcp/stream');
 
-      expect(mockSessionStore.terminationComplete).toHaveBeenCalledWith(
+      expect(mockBackendIpc.terminationComplete).toHaveBeenCalledWith(
         'https://example.com/mcp/stream',
         true,
         200
@@ -1623,7 +1766,11 @@ async function importHealthCheckFunctions() {
 
 /**
  * Helper to import session-aware functions for testing.
- * These implementations match the actual mcp-handlers session behavior.
+ * These implementations match the actual mcp-handlers behavior, which communicates
+ * with the backend MCPSessionManager via IPC for session state management.
+ *
+ * The mockBackendIpc object simulates the backend responses, allowing tests
+ * to verify that session state is correctly synced to the backend.
  */
 async function importSessionFunctions() {
   type CustomMcpServer = {
@@ -1705,29 +1852,29 @@ async function importSessionFunctions() {
       clearTimeout(timeout);
 
       if (!response.ok) {
-        mockSessionStore.updateState(server.url, 'error', `Re-init failed: HTTP ${response.status}`);
+        mockBackendIpc.updateState(server.url, 'error', `Re-init failed: HTTP ${response.status}`);
         return { success: false, error: `HTTP ${response.status}` };
       }
 
       const data = await response.json();
 
       if (data.error) {
-        mockSessionStore.updateState(server.url, 'error', 'MCP protocol error during re-init');
+        mockBackendIpc.updateState(server.url, 'error', 'MCP protocol error during re-init');
         return { success: false, error: 'MCP protocol error' };
       }
 
       const newSessionId = response.headers.get('mcp-session-id') || response.headers.get('Mcp-Session-Id');
 
       if (newSessionId) {
-        mockSessionStore.setSession(server.url, newSessionId, 'active');
+        mockBackendIpc.setSession(server.url, newSessionId, 'active');
         return { success: true, sessionId: newSessionId };
       } else {
-        mockSessionStore.updateState(server.url, 'active');
+        mockBackendIpc.updateState(server.url, 'active');
         return { success: true };
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      mockSessionStore.updateState(server.url, 'error', errorMessage);
+      mockBackendIpc.updateState(server.url, 'error', errorMessage);
       return { success: false, error: errorMessage };
     }
   }
@@ -1758,7 +1905,7 @@ async function importSessionFunctions() {
       };
 
       // Inject session ID if active
-      const sessionId = mockSessionStore.getSessionId(server.url);
+      const sessionId = mockBackendIpc.getSessionId(server.url);
       if (sessionId) {
         headers['Mcp-Session-Id'] = sessionId;
       }
@@ -1787,8 +1934,8 @@ async function importSessionFunctions() {
         message = response.status === 401 ? 'Authentication required' : 'Access forbidden';
       } else if ((response.status === 400 || response.status === 404) && !isRetry) {
         // Session error - clear and re-initialize
-        mockSessionStore.clearSession(server.url);
-        mockSessionStore.updateState(server.url, 'reconnecting');
+        mockBackendIpc.clearSession(server.url);
+        mockBackendIpc.updateState(server.url, 'reconnecting');
 
         const reinitResult = await reinitializeSession(server, startTime);
         if (reinitResult.success) {
@@ -1861,7 +2008,7 @@ async function importSessionFunctions() {
       const timeout = setTimeout(() => controller.abort(), 30000);
 
       // Mark session as initializing
-      mockSessionStore.updateState(server.url, 'initializing');
+      mockBackendIpc.updateState(server.url, 'initializing');
 
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
@@ -1897,7 +2044,7 @@ async function importSessionFunctions() {
       const responseTime = Date.now() - startTime;
 
       if (!response.ok) {
-        mockSessionStore.updateState(server.url, 'error', `HTTP ${response.status}`);
+        mockBackendIpc.updateState(server.url, 'error', `HTTP ${response.status}`);
         if (response.status === 401 || response.status === 403) {
           return {
             serverId: server.id,
@@ -1917,7 +2064,7 @@ async function importSessionFunctions() {
       const data = await response.json();
 
       if (data.error) {
-        mockSessionStore.updateState(server.url, 'error', 'MCP protocol error');
+        mockBackendIpc.updateState(server.url, 'error', 'MCP protocol error');
         return {
           serverId: server.id,
           success: false,
@@ -1930,9 +2077,9 @@ async function importSessionFunctions() {
       const sessionId = response.headers.get('mcp-session-id') || response.headers.get('Mcp-Session-Id');
 
       if (sessionId) {
-        mockSessionStore.setSession(server.url, sessionId, 'active');
+        mockBackendIpc.setSession(server.url, sessionId, 'active');
       } else {
-        mockSessionStore.updateState(server.url, 'active');
+        mockBackendIpc.updateState(server.url, 'active');
       }
 
       // Try to list tools
@@ -1968,11 +2115,11 @@ async function importSessionFunctions() {
           if (toolsData.result?.tools) {
             tools = toolsData.result.tools.map((t: { name: string }) => t.name);
           }
-          mockSessionStore.incrementRequestCount(server.url);
+          mockBackendIpc.incrementRequestCount(server.url);
         } else if (toolsResponse.status === 400 || toolsResponse.status === 404) {
           // Session expired immediately - re-initialize and retry
-          mockSessionStore.clearSession(server.url);
-          mockSessionStore.updateState(server.url, 'reconnecting');
+          mockBackendIpc.clearSession(server.url);
+          mockBackendIpc.updateState(server.url, 'reconnecting');
 
           const reinitResult = await reinitializeSession(server, startTime);
           if (reinitResult.success && reinitResult.sessionId) {
@@ -1997,7 +2144,7 @@ async function importSessionFunctions() {
                 if (retryData.result?.tools) {
                   tools = retryData.result.tools.map((t: { name: string }) => t.name);
                 }
-                mockSessionStore.incrementRequestCount(server.url);
+                mockBackendIpc.incrementRequestCount(server.url);
               }
             } catch {
               clearTimeout(retryTimeout);
@@ -2025,7 +2172,7 @@ async function importSessionFunctions() {
       const responseTime = Date.now() - startTime;
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
-      mockSessionStore.updateState(server.url, 'error', errorMessage);
+      mockBackendIpc.updateState(server.url, 'error', errorMessage);
 
       return {
         serverId: server.id,
@@ -2043,7 +2190,7 @@ async function importSessionFunctions() {
     serverUrl: string,
     headers?: Record<string, string>
   ): Promise<{ success: boolean; message: string; statusCode?: number }> {
-    const session = mockSessionStore.getSession(serverUrl);
+    const session = mockBackendIpc.getSession(serverUrl);
     if (!session) {
       return {
         success: false,
@@ -2053,14 +2200,14 @@ async function importSessionFunctions() {
 
     const sessionId = session.sessionId;
     if (!sessionId) {
-      mockSessionStore.clearSession(serverUrl);
+      mockBackendIpc.clearSession(serverUrl);
       return {
         success: true,
         message: 'Session cleared (no session ID to terminate)',
       };
     }
 
-    mockSessionStore.updateState(serverUrl, 'terminating');
+    mockBackendIpc.updateState(serverUrl, 'terminating');
 
     try {
       const controller = new AbortController();
@@ -2082,7 +2229,7 @@ async function importSessionFunctions() {
 
       clearTimeout(timeout);
 
-      mockSessionStore.terminationComplete(serverUrl, response.ok, response.status);
+      mockBackendIpc.terminationComplete(serverUrl, response.ok, response.status);
 
       if (response.ok || response.status === 204) {
         return {
@@ -2105,7 +2252,7 @@ async function importSessionFunctions() {
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      mockSessionStore.terminationComplete(serverUrl, false);
+      mockBackendIpc.terminationComplete(serverUrl, false);
 
       return {
         success: false,
