@@ -28,7 +28,7 @@ vi.mock('../../app-logger', () => ({
 }));
 
 // Import exported security functions directly from the module
-import { isCommandSafe, areArgsSafe, mapNetworkErrorToMessage } from '../mcp-handlers';
+import { isCommandSafe, areArgsSafe, mapNetworkErrorToMessage, isUrlAllowed } from '../mcp-handlers';
 
 describe('MCP Health Check Functions', () => {
   beforeEach(() => {
@@ -544,6 +544,211 @@ describe('MCP Health Check Functions', () => {
     it('returns generic message for unknown errors', () => {
       expect(mapNetworkErrorToMessage('Some unknown error')).toBe('Connection failed');
       expect(mapNetworkErrorToMessage('')).toBe('Connection failed');
+    });
+  });
+
+  describe('URL Security Validation', () => {
+    describe('Protocol Validation', () => {
+      it('allows http and https URLs', () => {
+        expect(isUrlAllowed('http://example.com')).toEqual({ allowed: true });
+        expect(isUrlAllowed('https://example.com')).toEqual({ allowed: true });
+      });
+
+      it('rejects non-http/https protocols', () => {
+        expect(isUrlAllowed('ftp://example.com')).toEqual({
+          allowed: false,
+          reason: 'Only HTTP/HTTPS URLs are allowed',
+        });
+        expect(isUrlAllowed('file:///etc/passwd')).toEqual({
+          allowed: false,
+          reason: 'Only HTTP/HTTPS URLs are allowed',
+        });
+        expect(isUrlAllowed('javascript:alert(1)')).toEqual({
+          allowed: false,
+          reason: 'Only HTTP/HTTPS URLs are allowed',
+        });
+        expect(isUrlAllowed('data:text/html,<script>alert(1)</script>')).toEqual({
+          allowed: false,
+          reason: 'Only HTTP/HTTPS URLs are allowed',
+        });
+      });
+    });
+
+    describe('Embedded Credentials', () => {
+      it('blocks URLs with username', () => {
+        expect(isUrlAllowed('https://user@example.com')).toEqual({
+          allowed: false,
+          reason: 'URLs with embedded credentials are not allowed',
+        });
+      });
+
+      it('blocks URLs with username and password', () => {
+        expect(isUrlAllowed('https://user:pass@example.com')).toEqual({
+          allowed: false,
+          reason: 'URLs with embedded credentials are not allowed',
+        });
+      });
+
+      it('blocks URLs with only password', () => {
+        expect(isUrlAllowed('https://:pass@example.com')).toEqual({
+          allowed: false,
+          reason: 'URLs with embedded credentials are not allowed',
+        });
+      });
+    });
+
+    describe('Localhost Allowance', () => {
+      it('allows localhost hostname', () => {
+        expect(isUrlAllowed('http://localhost:8080')).toEqual({ allowed: true });
+        expect(isUrlAllowed('https://localhost')).toEqual({ allowed: true });
+      });
+
+      it('allows 127.0.0.1 IPv4 loopback', () => {
+        expect(isUrlAllowed('http://127.0.0.1:3000')).toEqual({ allowed: true });
+        expect(isUrlAllowed('https://127.0.0.1')).toEqual({ allowed: true });
+      });
+
+      it('allows ::1 IPv6 loopback', () => {
+        expect(isUrlAllowed('http://[::1]:8080')).toEqual({ allowed: true });
+        expect(isUrlAllowed('https://[::1]')).toEqual({ allowed: true });
+      });
+
+      it('handles case-insensitive localhost', () => {
+        expect(isUrlAllowed('http://LOCALHOST:8080')).toEqual({ allowed: true });
+        expect(isUrlAllowed('https://LoCaLhOsT')).toEqual({ allowed: true });
+      });
+    });
+
+    describe('Private IP Blocking', () => {
+      it('blocks Class A private network (10.0.0.0/8)', () => {
+        expect(isUrlAllowed('http://10.0.0.1')).toEqual({
+          allowed: false,
+          reason: 'Private IP addresses are not allowed (except localhost)',
+        });
+        expect(isUrlAllowed('http://10.255.255.255')).toEqual({
+          allowed: false,
+          reason: 'Private IP addresses are not allowed (except localhost)',
+        });
+        expect(isUrlAllowed('http://10.1.2.3:8080')).toEqual({
+          allowed: false,
+          reason: 'Private IP addresses are not allowed (except localhost)',
+        });
+      });
+
+      it('blocks link-local/cloud metadata network (169.254.0.0/16)', () => {
+        expect(isUrlAllowed('http://169.254.0.1')).toEqual({
+          allowed: false,
+          reason: 'Private IP addresses are not allowed (except localhost)',
+        });
+        expect(isUrlAllowed('http://169.254.169.254')).toEqual({
+          allowed: false,
+          reason: 'Private IP addresses are not allowed (except localhost)',
+        });
+        expect(isUrlAllowed('http://169.254.255.255')).toEqual({
+          allowed: false,
+          reason: 'Private IP addresses are not allowed (except localhost)',
+        });
+      });
+
+      it('blocks Class C private network (192.168.0.0/16)', () => {
+        expect(isUrlAllowed('http://192.168.0.1')).toEqual({
+          allowed: false,
+          reason: 'Private IP addresses are not allowed (except localhost)',
+        });
+        expect(isUrlAllowed('http://192.168.1.100:3000')).toEqual({
+          allowed: false,
+          reason: 'Private IP addresses are not allowed (except localhost)',
+        });
+        expect(isUrlAllowed('http://192.168.255.255')).toEqual({
+          allowed: false,
+          reason: 'Private IP addresses are not allowed (except localhost)',
+        });
+      });
+
+      it('blocks Class B private network (172.16.0.0/12)', () => {
+        expect(isUrlAllowed('http://172.16.0.1')).toEqual({
+          allowed: false,
+          reason: 'Private IP addresses are not allowed (except localhost)',
+        });
+        expect(isUrlAllowed('http://172.20.10.50')).toEqual({
+          allowed: false,
+          reason: 'Private IP addresses are not allowed (except localhost)',
+        });
+        expect(isUrlAllowed('http://172.31.255.255')).toEqual({
+          allowed: false,
+          reason: 'Private IP addresses are not allowed (except localhost)',
+        });
+      });
+
+      it('allows 172.x IPs outside private range', () => {
+        // 172.15.x.x (below 172.16.0.0)
+        expect(isUrlAllowed('http://172.15.0.1')).toEqual({ allowed: true });
+        // 172.32.x.x (above 172.31.255.255)
+        expect(isUrlAllowed('http://172.32.0.1')).toEqual({ allowed: true });
+      });
+    });
+
+    describe('Public IP Allowance', () => {
+      it('allows public IPv4 addresses', () => {
+        expect(isUrlAllowed('http://8.8.8.8')).toEqual({ allowed: true });
+        expect(isUrlAllowed('https://1.1.1.1')).toEqual({ allowed: true });
+        expect(isUrlAllowed('http://93.184.216.34')).toEqual({ allowed: true });
+      });
+
+      it('allows public domain names', () => {
+        expect(isUrlAllowed('https://example.com')).toEqual({ allowed: true });
+        expect(isUrlAllowed('https://api.example.com:8443')).toEqual({ allowed: true });
+        expect(isUrlAllowed('http://subdomain.example.org/path')).toEqual({ allowed: true });
+      });
+    });
+
+    describe('Invalid URL Handling', () => {
+      it('rejects malformed URLs', () => {
+        expect(isUrlAllowed('not a url')).toEqual({
+          allowed: false,
+          reason: 'Invalid URL',
+        });
+        expect(isUrlAllowed('http://')).toEqual({
+          allowed: false,
+          reason: 'Invalid URL',
+        });
+        expect(isUrlAllowed('')).toEqual({
+          allowed: false,
+          reason: 'Invalid URL',
+        });
+        expect(isUrlAllowed('://example.com')).toEqual({
+          allowed: false,
+          reason: 'Invalid URL',
+        });
+      });
+    });
+
+    describe('Edge Cases', () => {
+      it('handles URLs with ports', () => {
+        expect(isUrlAllowed('http://localhost:8080')).toEqual({ allowed: true });
+        expect(isUrlAllowed('https://example.com:443')).toEqual({ allowed: true });
+        expect(isUrlAllowed('http://10.0.0.1:3000')).toEqual({
+          allowed: false,
+          reason: 'Private IP addresses are not allowed (except localhost)',
+        });
+      });
+
+      it('handles URLs with paths and query params', () => {
+        expect(isUrlAllowed('https://example.com/api/v1')).toEqual({ allowed: true });
+        expect(isUrlAllowed('https://example.com/path?query=value')).toEqual({ allowed: true });
+        expect(isUrlAllowed('http://localhost:8080/mcp?test=1')).toEqual({ allowed: true });
+      });
+
+      it('handles URLs with fragments', () => {
+        expect(isUrlAllowed('https://example.com#fragment')).toEqual({ allowed: true });
+        expect(isUrlAllowed('https://example.com/path#section')).toEqual({ allowed: true });
+      });
+
+      it('handles IPv6 addresses (if supported by URL constructor)', () => {
+        // IPv6 loopback already tested above
+        // Test other IPv6 (note: private IPv6 detection would require more complex logic)
+        expect(isUrlAllowed('http://[2001:db8::1]')).toEqual({ allowed: true });
+      });
     });
   });
 });
