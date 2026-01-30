@@ -90,8 +90,8 @@ class TestMCPSession:
         assert session.reinitialize_count == 0
         assert session.last_error is None
 
-    def test_to_dict_serializes_session(self):
-        """Serializes session to dictionary with both session_id and masked ID."""
+    def test_to_dict_excludes_session_id_by_default(self):
+        """Serializes session without session_id by default (security)."""
         from core.mcp_session import MCPSession, MCPSessionState
 
         session = MCPSession("https://example.com/mcp")
@@ -106,7 +106,7 @@ class TestMCPSession:
         result = session.to_dict()
 
         assert result["server_url"] == "https://example.com/mcp"
-        assert result["session_id"] == "test-session-12345"  # Actual ID for IPC
+        assert "session_id" not in result  # NOT included by default
         assert result["session_id_masked"] == "test****"  # Masked ID for logging
         assert result["state"] == "active"
         assert result["established_at"] == "2024-01-01T00:00:00Z"
@@ -115,14 +115,32 @@ class TestMCPSession:
         assert result["reinitialize_count"] == 2
         assert result["last_error"] == "Connection lost"
 
+    def test_to_dict_includes_session_id_when_requested(self):
+        """Serializes session with session_id when include_session_id=True."""
+        from core.mcp_session import MCPSession, MCPSessionState
+
+        session = MCPSession("https://example.com/mcp")
+        session.session_id = "test-session-12345"
+        session.state = MCPSessionState.ACTIVE
+
+        result = session.to_dict(include_session_id=True)
+
+        assert result["session_id"] == "test-session-12345"  # Actual ID for IPC
+        assert result["session_id_masked"] == "test****"  # Masked ID for logging
+
     def test_to_dict_masks_none_session_id(self):
         """Serializes session with None session ID."""
         from core.mcp_session import MCPSession
 
         session = MCPSession("https://example.com/mcp")
         result = session.to_dict()
-        assert result["session_id"] is None  # Actual ID is None
+        assert "session_id" not in result  # NOT included by default
         assert result["session_id_masked"] == "<none>"  # Masked representation
+
+        # With include_session_id=True
+        result_with_id = session.to_dict(include_session_id=True)
+        assert result_with_id["session_id"] is None
+        assert result_with_id["session_id_masked"] == "<none>"
 
     def test_copy_creates_independent_session(self):
         """copy() creates an independent session with same values."""
@@ -1014,6 +1032,40 @@ class TestHandleMCPSessionSet:
             assert result["success"] is True, f"Failed for state: {state}"
             assert result["session"]["state"] == state
 
+    def test_disconnected_with_no_session_id_clears_session(self):
+        """Setting disconnected state with no session_id clears the session record."""
+        from services.mcp_session_ipc import handle_mcp_session_set, handle_mcp_session_get
+        from core.mcp_session import get_mcp_session_manager
+
+        # First create an active session
+        handle_mcp_session_set({
+            "server_url": "https://example.com/mcp",
+            "session_id": "test-session-12345",
+            "state": "active",
+        })
+
+        # Verify session exists
+        get_result = handle_mcp_session_get({
+            "server_url": "https://example.com/mcp"
+        })
+        assert get_result["session"] is not None
+
+        # Set to disconnected with no session_id - should clear the session record
+        result = handle_mcp_session_set({
+            "server_url": "https://example.com/mcp",
+            "session_id": None,
+            "state": "disconnected",
+        })
+
+        assert result["success"] is True
+        # Session should be cleared (None returned)
+        assert result["session"] is None
+
+        # Verify session is no longer in manager
+        manager = get_mcp_session_manager()
+        session = manager.get_session("https://example.com/mcp")
+        assert session is None
+
 
 class TestHandleMCPSessionGet:
     """Tests for handle_mcp_session_get() IPC handler."""
@@ -1129,8 +1181,8 @@ class TestHandleMCPSessionGetAll:
         assert "https://server2.example.com/mcp" in urls
         assert "https://server3.example.com/mcp" in urls
 
-    def test_sessions_have_masked_ids(self):
-        """Returned sessions have masked session IDs."""
+    def test_sessions_have_masked_ids_but_not_actual_ids(self):
+        """Returned sessions have masked IDs but NOT actual session_id (security)."""
         from services.mcp_session_ipc import handle_mcp_session_get_all, handle_mcp_session_set
 
         handle_mcp_session_set({
@@ -1141,7 +1193,10 @@ class TestHandleMCPSessionGetAll:
 
         result = handle_mcp_session_get_all({})
 
+        # Should have masked ID for display
         assert result["sessions"][0]["session_id_masked"] == "secr****"
+        # Should NOT have actual session_id (security)
+        assert "session_id" not in result["sessions"][0]
         assert "secret-session-id-12345" not in str(result)
 
 

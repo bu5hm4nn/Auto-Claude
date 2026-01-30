@@ -80,11 +80,21 @@ class MCPSession:
         session.last_error = self.last_error
         return session
 
-    def to_dict(self) -> dict:
-        """Convert session to dictionary for serialization."""
-        return {
+    def to_dict(self, *, include_session_id: bool = False) -> dict:
+        """
+        Convert session to dictionary for serialization.
+
+        Args:
+            include_session_id: If True, include the actual session_id in output.
+                               Defaults to False to prevent accidental leakage.
+                               Only set to True when the caller explicitly needs
+                               the session ID (e.g., for IPC with frontend).
+
+        Returns:
+            Dictionary representation of the session.
+        """
+        data: dict = {
             "server_url": self.server_url,
-            "session_id": self.session_id,  # Actual session ID for IPC
             "session_id_masked": mask_session_id(self.session_id),  # For logging/display
             "state": self.state.value,
             "established_at": self.established_at,
@@ -93,6 +103,9 @@ class MCPSession:
             "reinitialize_count": self.reinitialize_count,
             "last_error": self.last_error,
         }
+        if include_session_id:
+            data["session_id"] = self.session_id
+        return data
 
 
 class MCPSessionTerminateResult:

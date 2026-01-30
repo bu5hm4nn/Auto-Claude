@@ -103,8 +103,11 @@ def handle_mcp_session_set(data: dict[str, Any]) -> dict[str, Any]:
     manager = get_mcp_session_manager()
 
     try:
+        # Special case: disconnected with no session ID means "clear the session record"
+        if state == MCPSessionState.DISCONNECTED and session_id is None:
+            manager.clear_session(server_url)
         # Set session with session_id if provided (and non-empty), otherwise just update state
-        if session_id is not None or state in (
+        elif session_id is not None or state in (
             MCPSessionState.ACTIVE,
             MCPSessionState.INITIALIZING,
         ):
@@ -114,9 +117,9 @@ def handle_mcp_session_set(data: dict[str, Any]) -> dict[str, Any]:
             # Use update_state for state-only changes (error, reconnecting, etc.)
             manager.update_state(server_url, state, error)
 
-        # Get the updated session to return
+        # Get the updated session to return (include session_id for frontend IPC)
         session = manager.get_session(server_url)
-        session_dict = session.to_dict() if session else None
+        session_dict = session.to_dict(include_session_id=True) if session else None
 
         logger.debug(
             "mcp:session:set success for %s (state: %s, id: %s)",
@@ -183,7 +186,8 @@ def handle_mcp_session_get(data: dict[str, Any]) -> dict[str, Any]:
 
     try:
         session = manager.get_session(server_url)
-        session_dict = session.to_dict() if session else None
+        # Include session_id for frontend IPC (needed for header injection)
+        session_dict = session.to_dict(include_session_id=True) if session else None
 
         if session:
             logger.debug("mcp:session:get success for %s", server_url)
@@ -238,13 +242,9 @@ def handle_mcp_session_get_all(data: dict[str, Any]) -> dict[str, Any]:
 
     try:
         sessions = manager.get_all_sessions()
-        # Remove plaintext session_id from bulk listing to avoid leaking session IDs.
+        # Don't include session_id in bulk listing to avoid leaking session IDs.
         # The masked version (session_id_masked) is still included for display purposes.
-        sessions_list: list[dict[str, Any]] = []
-        for session in sessions:
-            d = session.to_dict()
-            d.pop("session_id", None)
-            sessions_list.append(d)
+        sessions_list = [session.to_dict() for session in sessions]
 
         logger.debug("mcp:session:getAll retrieved %d sessions", len(sessions_list))
 

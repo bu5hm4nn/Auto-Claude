@@ -174,7 +174,13 @@ async function executeBackendSessionIpc<T>(
         cwd: backendPath,
         env: {
           ...pythonEnvManager.getPythonEnv(),
-          PYTHONPATH: backendPath,
+          PYTHONPATH: [
+            backendPath,
+            pythonEnvManager.getPythonEnv().PYTHONPATH,
+            process.env.PYTHONPATH,
+          ]
+            .filter(Boolean)
+            .join(path.delimiter),
         },
         timeout: 10000, // 10 second timeout
         encoding: 'utf-8',
@@ -422,14 +428,20 @@ export async function notifyTerminationComplete(
   const shouldClear = success || statusCode === 204 || statusCode === 404;
 
   if (shouldClear) {
-    await syncSessionToBackend(serverUrl, null, 'disconnected');
+    const cleared = await syncSessionToBackend(serverUrl, null, 'disconnected');
+    if (!cleared.success) {
+      appLog.error('[MCP Session] Failed to clear session after termination:', cleared.error);
+    }
   } else {
-    await syncSessionToBackend(
+    const failed = await syncSessionToBackend(
       serverUrl,
       null,
       'error',
       `Session termination failed${statusCode ? ` (HTTP ${statusCode})` : ''}`
     );
+    if (!failed.success) {
+      appLog.error('[MCP Session] Failed to sync termination failure:', failed.error);
+    }
   }
 
   appLog.debug(
