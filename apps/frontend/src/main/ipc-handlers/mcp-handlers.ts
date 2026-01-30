@@ -8,6 +8,7 @@ import { ipcMain } from 'electron';
 import { IPC_CHANNELS } from '../../shared/constants/ipc';
 import type { CustomMcpServer, McpHealthCheckResult, McpHealthStatus, McpTestConnectionResult } from '../../shared/types/project';
 import { spawn } from 'child_process';
+import net from 'net';
 import os from 'os';
 import { appLog } from '../app-logger';
 import { isWindows } from '../platform';
@@ -53,17 +54,13 @@ let cachedLocalSubnets: LocalSubnet[] | null = null;
 
 /**
  * Convert an IPv4 address string to a 32-bit unsigned integer.
- * Returns -1 for invalid IP addresses (malformed or octets out of range).
+ * Returns -1 for invalid IP addresses.
+ * Uses Node.js net.isIPv4() for validation.
  */
 export function ipToInt(ip: string): number {
-  const parts = ip.split('.');
-  if (parts.length !== 4) return -1;
+  if (!net.isIPv4(ip)) return -1;
 
-  const octets = parts.map(p => parseInt(p, 10));
-  if (octets.some(o => isNaN(o) || o < 0 || o > 255)) {
-    return -1;
-  }
-
+  const octets = ip.split('.').map(Number);
   return octets.reduce((acc, octet) => (acc << 8) + octet, 0) >>> 0;
 }
 
@@ -82,10 +79,12 @@ export function getLocalSubnets(): LocalSubnet[] {
     for (const info of iface) {
       // Only consider external (non-loopback) IPv4 interfaces
       if (info.family === 'IPv4' && !info.internal) {
-        subnets.push({
-          address: ipToInt(info.address),
-          mask: ipToInt(info.netmask),
-        });
+        const address = ipToInt(info.address);
+        const mask = ipToInt(info.netmask);
+        // Skip invalid interface data (defensive check)
+        if (address === -1 || mask === -1) continue;
+
+        subnets.push({ address, mask });
       }
     }
   }
@@ -171,9 +170,9 @@ export function isUrlAllowed(url: string): { allowed: boolean; reason?: string }
     }
 
     // Check for private IP ranges and special addresses
-    const ipMatch = hostname.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
-    if (ipMatch) {
-      const [, a, b, c, d] = ipMatch.map(Number);
+    // Use net.isIPv4() for validation - it rejects malformed IPs like 999.999.999.999
+    if (net.isIPv4(hostname)) {
+      const [a, b, c, d] = hostname.split('.').map(Number);
 
       // Block 0.0.0.0 - it's not a valid destination address
       // (used for binding servers to all interfaces, not for connecting)

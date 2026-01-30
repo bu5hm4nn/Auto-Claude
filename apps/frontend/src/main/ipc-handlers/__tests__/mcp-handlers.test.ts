@@ -22,6 +22,12 @@ vi.mock('../../platform', () => ({
   isWindows: vi.fn(() => false),
 }));
 
+// Use real net module for IP validation (no need to mock - it's pure functions)
+vi.mock('net', async () => {
+  const actual = await vi.importActual<typeof import('net')>('net');
+  return actual;
+});
+
 // Mock app logger
 vi.mock('../../app-logger', () => ({
   appLog: vi.fn(),
@@ -875,6 +881,14 @@ describe('MCP Health Check Functions', () => {
         expect(ipToInt('a.b.c.d')).toBe(-1);
         expect(ipToInt('192.168.1.x')).toBe(-1);
 
+        // parseInt-permissive forms that must be rejected
+        expect(ipToInt('1e2.0.0.1')).toBe(-1);
+        expect(ipToInt('1.2.3.4 ')).toBe(-1);
+        expect(ipToInt(' 1.2.3.4')).toBe(-1);
+        expect(ipToInt('1.2.3.04x')).toBe(-1);
+        expect(ipToInt('+1.2.3.4')).toBe(-1);
+        expect(ipToInt('1.2.3.4\n')).toBe(-1);
+
         // Empty or malformed
         expect(ipToInt('')).toBe(-1);
         expect(ipToInt('...')).toBe(-1);
@@ -956,6 +970,11 @@ describe('MCP Health Check Functions', () => {
         expect(isInLocalSubnet('999.999.999.999')).toBe(false);
         expect(isInLocalSubnet('1.2.3')).toBe(false);
         expect(isInLocalSubnet('not.an.ip')).toBe(false);
+
+        // parseInt-permissive forms that must be rejected
+        expect(isInLocalSubnet('1e2.0.0.1')).toBe(false);
+        expect(isInLocalSubnet('1.2.3.4 ')).toBe(false);
+        expect(isInLocalSubnet(' 1.2.3.4')).toBe(false);
       });
 
       it('handles multiple network interfaces', () => {
