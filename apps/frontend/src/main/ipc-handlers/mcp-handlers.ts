@@ -15,7 +15,7 @@ import type {
   McpSessionStatus,
   McpTestConnectionResult,
 } from '../../shared/types/project';
-import { spawn, execFileSync } from 'child_process';
+import { spawn, execFile } from 'child_process';
 import path from 'path';
 import { existsSync } from 'fs';
 import { app } from 'electron';
@@ -97,12 +97,23 @@ export function mapNetworkErrorToMessage(errorMessage: string): string {
 // ============================================================================
 
 /**
+ * Module-level cache for backend source path.
+ * undefined = not yet computed, null = computed but not found, string = found path
+ */
+let cachedBackendPath: string | null | undefined;
+
+/**
  * Get the path to the backend source directory.
  * Handles both development and packaged app scenarios.
+ * Result is cached to avoid repeated filesystem lookups.
  *
  * @returns Path to backend source, or null if not found
  */
 function getBackendSourcePath(): string | null {
+  if (cachedBackendPath !== undefined) {
+    return cachedBackendPath;
+  }
+
   // Validate path - check if mcp_session_ipc.py exists
   const validatePath = (p: string): boolean => {
     return existsSync(p) && existsSync(path.join(p, 'services', 'mcp_session_ipc.py'));
@@ -121,10 +132,13 @@ function getBackendSourcePath(): string | null {
 
   for (const p of possiblePaths) {
     if (validatePath(p)) {
-      return p;
+      cachedBackendPath = p;
+      return cachedBackendPath;
     }
   }
-  return null;
+
+  cachedBackendPath = null;
+  return cachedBackendPath;
 }
 
 /**
@@ -152,10 +166,11 @@ async function executeBackendSessionIpc<T>(
   const moduleArgs = ['-m', 'services.mcp_session_ipc', JSON.stringify(message)];
 
   return new Promise((resolve) => {
-    try {
-      // Use execFileSync for simple request-response pattern
-      // This is more efficient than spawn for one-shot IPC calls
-      const output = execFileSync(pythonCommand, [...pythonBaseArgs, ...moduleArgs], {
+    // Use async execFile to avoid blocking the Electron main process
+    execFile(
+      pythonCommand,
+      [...pythonBaseArgs, ...moduleArgs],
+      {
         cwd: backendPath,
         env: {
           ...pythonEnvManager.getPythonEnv(),
@@ -165,30 +180,37 @@ async function executeBackendSessionIpc<T>(
         encoding: 'utf-8',
         maxBuffer: 1024 * 1024, // 1MB buffer
         windowsHide: true,
-      });
+      },
+      (execError, stdout, stderr) => {
+        if (execError) {
+          const errorMessage = execError.message || String(execError);
+          appLog.error('[MCP Session IPC] Execution failed:', errorMessage);
+          if (stderr) {
+            appLog.debug('[MCP Session IPC] stderr:', stderr);
+          }
+          resolve({
+            success: false,
+            error: errorMessage,
+          });
+          return;
+        }
 
-      try {
-        const response = JSON.parse(output.trim());
-        resolve({
-          success: response.success ?? false,
-          data: response,
-          error: response.error || response.message,
-        });
-      } catch (parseError) {
-        appLog.error('[MCP Session IPC] Failed to parse response:', output);
-        resolve({
-          success: false,
-          error: 'Failed to parse backend response',
-        });
+        try {
+          const response = JSON.parse(stdout.trim());
+          resolve({
+            success: response.success ?? false,
+            data: response,
+            error: response.error || response.message,
+          });
+        } catch {
+          appLog.error('[MCP Session IPC] Failed to parse response:', stdout);
+          resolve({
+            success: false,
+            error: 'Failed to parse backend response',
+          });
+        }
       }
-    } catch (execError) {
-      const errorMessage = execError instanceof Error ? execError.message : String(execError);
-      appLog.error('[MCP Session IPC] Execution failed:', errorMessage);
-      resolve({
-        success: false,
-        error: errorMessage,
-      });
-    }
+    );
   });
 }
 
@@ -395,8 +417,21 @@ export async function notifyTerminationComplete(
   success: boolean,
   statusCode?: number
 ): Promise<void> {
-  // Clear the session in backend by setting state to 'disconnected'
-  await syncSessionToBackend(serverUrl, null, 'disconnected');
+  // Only clear session on success or expected status codes (204 No Content, 404 Not Found)
+  // On failure, set to 'error' state so UI can show termination failed
+  const shouldClear = success || statusCode === 204 || statusCode === 404;
+
+  if (shouldClear) {
+    await syncSessionToBackend(serverUrl, null, 'disconnected');
+  } else {
+    await syncSessionToBackend(
+      serverUrl,
+      null,
+      'error',
+      `Session termination failed${statusCode ? ` (HTTP ${statusCode})` : ''}`
+    );
+  }
+
   appLog.debug(
     `[MCP Session] Termination complete for ${serverUrl} (success: ${success}, status: ${statusCode ?? 'n/a'})`
   );
@@ -448,7 +483,9 @@ export async function getSessionStatusFromBackend(
       statusMessage = `Active (${session.requestCount} requests)`;
       break;
     case 'reconnecting':
-      statusMessage = `Reconnecting (attempt ${session.reinitializeCount + 1})`;
+      // Use Math.max(1, ...) to handle edge case where reinitializeCount is 0
+      // during the first reconnect attempt (count may not be incremented yet)
+      statusMessage = `Reconnecting (attempt ${Math.max(1, session.reinitializeCount)})`;
       break;
     case 'terminating':
       statusMessage = 'Disconnecting...';
@@ -789,8 +826,10 @@ async function reinitializeStreamableHttpSession(
     // Headers.get() is case-insensitive per HTTP spec
     const newSessionId = response.headers.get('Mcp-Session-Id');
 
+    const responseTime = Date.now() - startTime;
+
     if (newSessionId) {
-      appLog.debug(`MCP session re-initialized for ${server.id} (new session established)`);
+      appLog.debug(`MCP session re-initialized for ${server.id} in ${responseTime}ms (new session established)`);
 
       // Sync new active session to backend (single source of truth)
       await syncSessionToBackend(server.url, newSessionId, 'active');
@@ -798,7 +837,7 @@ async function reinitializeStreamableHttpSession(
       return { success: true, sessionId: newSessionId };
     } else {
       // Server didn't return a session ID - still mark as active
-      appLog.debug(`MCP re-initialized for ${server.id} (no session ID returned)`);
+      appLog.debug(`MCP re-initialized for ${server.id} in ${responseTime}ms (no session ID returned)`);
 
       // Sync active state to backend (without session ID)
       await syncSessionToBackend(server.url, null, 'active');

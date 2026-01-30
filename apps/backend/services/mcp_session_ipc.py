@@ -93,14 +93,17 @@ def handle_mcp_session_set(data: dict[str, Any]) -> dict[str, Any]:
         }
 
     # Get optional fields
-    session_id = data.get("session_id")  # Can be None
+    session_id_raw = data.get("session_id")  # Can be None or empty string
     error = data.get("error")  # Optional error message
+
+    # Treat empty strings as None to avoid storing invalid session IDs
+    session_id = session_id_raw if session_id_raw and session_id_raw.strip() else None
 
     # Get the session manager singleton
     manager = get_mcp_session_manager()
 
     try:
-        # Set session with session_id if provided, otherwise just update state
+        # Set session with session_id if provided (and non-empty), otherwise just update state
         if session_id is not None or state in (
             MCPSessionState.ACTIVE,
             MCPSessionState.INITIALIZING,
@@ -235,7 +238,13 @@ def handle_mcp_session_get_all(data: dict[str, Any]) -> dict[str, Any]:
 
     try:
         sessions = manager.get_all_sessions()
-        sessions_list = [session.to_dict() for session in sessions]
+        # Remove plaintext session_id from bulk listing to avoid leaking session IDs.
+        # The masked version (session_id_masked) is still included for display purposes.
+        sessions_list: list[dict[str, Any]] = []
+        for session in sessions:
+            d = session.to_dict()
+            d.pop("session_id", None)
+            sessions_list.append(d)
 
         logger.debug("mcp:session:getAll retrieved %d sessions", len(sessions_list))
 
@@ -441,9 +450,10 @@ if __name__ == "__main__":
             sys.exit(1)
     else:
         # Read from stdin (non-interactive single message mode)
+        # Use read() instead of readline() to support multi-line JSON
         try:
-            line = sys.stdin.readline().strip()
-            if not line:
+            input_data = sys.stdin.read().strip()
+            if not input_data:
                 error_response = {
                     "success": False,
                     "message": "No input received",
@@ -452,7 +462,7 @@ if __name__ == "__main__":
                 print(json.dumps(error_response))
                 sys.exit(1)
 
-            message = json.loads(line)
+            message = json.loads(input_data)
             result = dispatch_mcp_session_message(message)
             print(json.dumps(result))
             sys.exit(0 if result.get("success") else 1)
