@@ -858,6 +858,27 @@ describe('MCP Health Check Functions', () => {
         expect(ipToInt('255.0.0.0')).toBe(0xFF000000);
         expect(ipToInt('0.255.0.0')).toBe(0x00FF0000);
       });
+
+      it('returns -1 for invalid IP addresses', () => {
+        // Octets out of range
+        expect(ipToInt('256.0.0.0')).toBe(-1);
+        expect(ipToInt('0.0.0.256')).toBe(-1);
+        expect(ipToInt('999.999.999.999')).toBe(-1);
+        expect(ipToInt('-1.0.0.0')).toBe(-1);
+
+        // Wrong number of octets
+        expect(ipToInt('1.2.3')).toBe(-1);
+        expect(ipToInt('1.2.3.4.5')).toBe(-1);
+        expect(ipToInt('192.168.1')).toBe(-1);
+
+        // Non-numeric octets
+        expect(ipToInt('a.b.c.d')).toBe(-1);
+        expect(ipToInt('192.168.1.x')).toBe(-1);
+
+        // Empty or malformed
+        expect(ipToInt('')).toBe(-1);
+        expect(ipToInt('...')).toBe(-1);
+      });
     });
 
     describe('getLocalSubnets', () => {
@@ -928,6 +949,13 @@ describe('MCP Health Check Functions', () => {
         expect(isInLocalSubnet('192.168.2.1')).toBe(false);
         expect(isInLocalSubnet('10.0.0.1')).toBe(false);
         expect(isInLocalSubnet('172.16.0.1')).toBe(false);
+      });
+
+      it('returns false for invalid IP addresses', () => {
+        expect(isInLocalSubnet('256.0.0.0')).toBe(false);
+        expect(isInLocalSubnet('999.999.999.999')).toBe(false);
+        expect(isInLocalSubnet('1.2.3')).toBe(false);
+        expect(isInLocalSubnet('not.an.ip')).toBe(false);
       });
 
       it('handles multiple network interfaces', () => {
