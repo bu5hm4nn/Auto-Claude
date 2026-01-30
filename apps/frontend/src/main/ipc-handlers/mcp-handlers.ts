@@ -248,6 +248,17 @@ async function checkStreamableHttpHealth(server: CustomMcpServer, startTime: num
     };
   }
 
+  // Defense-in-depth: Validate URL to prevent SSRF attacks
+  const urlValidation = isUrlAllowed(server.url);
+  if (!urlValidation.allowed) {
+    return {
+      serverId: server.id,
+      status: 'unhealthy',
+      message: urlValidation.reason || 'URL not allowed',
+      checkedAt: new Date().toISOString(),
+    };
+  }
+
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10000); // 10 second timeout
