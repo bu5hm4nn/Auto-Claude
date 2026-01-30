@@ -8,6 +8,8 @@ import { ipcMain } from 'electron';
 import { IPC_CHANNELS } from '../../shared/constants/ipc';
 import type { CustomMcpServer, McpHealthCheckResult, McpHealthStatus, McpTestConnectionResult } from '../../shared/types/project';
 import { spawn } from 'child_process';
+import net from 'net';
+import os from 'os';
 import { appLog } from '../app-logger';
 import { isWindows } from '../platform';
 
@@ -36,6 +38,85 @@ const DANGEROUS_FLAGS = new Set([
 const SHELL_METACHARACTERS = ['&', '|', '>', '<', '^', '%', ';', '$', '`', '\n', '\r'];
 
 /**
+ * Represents a local network subnet that this machine is connected to.
+ */
+interface LocalSubnet {
+  address: number;  // IP as 32-bit unsigned integer
+  mask: number;     // Netmask as 32-bit unsigned integer
+}
+
+/**
+ * Cached local subnets to avoid repeated os.networkInterfaces() calls.
+ * Cache is acceptable for security: worst case is a newly added subnet
+ * is blocked until app restart.
+ */
+let cachedLocalSubnets: LocalSubnet[] | null = null;
+
+/**
+ * Convert an IPv4 address string to a 32-bit unsigned integer.
+ * Returns -1 for invalid IP addresses.
+ * Uses Node.js net.isIPv4() for validation.
+ */
+export function ipToInt(ip: string): number {
+  if (!net.isIPv4(ip)) return -1;
+
+  const octets = ip.split('.').map(Number);
+  return octets.reduce((acc, octet) => (acc << 8) + octet, 0) >>> 0;
+}
+
+/**
+ * Get all local subnets that this machine is directly connected to.
+ * Uses os.networkInterfaces() to discover network configuration.
+ */
+export function getLocalSubnets(): LocalSubnet[] {
+  if (cachedLocalSubnets) return cachedLocalSubnets;
+
+  const subnets: LocalSubnet[] = [];
+  const interfaces = os.networkInterfaces();
+
+  for (const iface of Object.values(interfaces)) {
+    if (!iface) continue;
+    for (const info of iface) {
+      // Only consider external (non-loopback) IPv4 interfaces
+      if (info.family === 'IPv4' && !info.internal) {
+        const address = ipToInt(info.address);
+        const mask = ipToInt(info.netmask);
+        // Skip invalid interface data (defensive check)
+        if (address === -1 || mask === -1) continue;
+
+        subnets.push({ address, mask });
+      }
+    }
+  }
+
+  cachedLocalSubnets = subnets;
+  return subnets;
+}
+
+/**
+ * Clear the cached local subnets (useful for testing).
+ */
+export function clearLocalSubnetCache(): void {
+  cachedLocalSubnets = null;
+}
+
+/**
+ * Check if an IPv4 address is within one of the local subnets.
+ * This allows access to MCP servers on the same LAN as this machine.
+ * Returns false for invalid IP addresses.
+ */
+export function isInLocalSubnet(ip: string): boolean {
+  const ipInt = ipToInt(ip);
+  if (ipInt === -1) return false; // Invalid IP address
+
+  const subnets = getLocalSubnets();
+
+  return subnets.some(subnet =>
+    (ipInt & subnet.mask) === (subnet.address & subnet.mask)
+  );
+}
+
+/**
  * Validate that a command is in the safe allowlist
  */
 export function isCommandSafe(command: string | undefined): boolean {
@@ -62,6 +143,70 @@ export function areArgsSafe(args: string[] | undefined): boolean {
   }
 
   return true;
+}
+
+/**
+ * Defense-in-depth: URL validation to prevent SSRF attacks
+ * Validates that URLs used in MCP HTTP handlers don't target internal/private networks
+ */
+export function isUrlAllowed(url: string): { allowed: boolean; reason?: string } {
+  try {
+    const parsed = new URL(url);
+
+    // Only allow http/https protocols
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return { allowed: false, reason: 'Only HTTP/HTTPS URLs are allowed' };
+    }
+
+    // Block embedded credentials to prevent credential leakage
+    if (parsed.username || parsed.password) {
+      return { allowed: false, reason: 'URLs with embedded credentials are not allowed' };
+    }
+
+    // Allow localhost explicitly for local MCP servers
+    const hostname = parsed.hostname.toLowerCase();
+    if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1') {
+      return { allowed: true };
+    }
+
+    // Check for private IP ranges and special addresses
+    // Use net.isIPv4() for validation - it rejects malformed IPs like 999.999.999.999
+    if (net.isIPv4(hostname)) {
+      const [a, b, c, d] = hostname.split('.').map(Number);
+
+      // Block 0.0.0.0 - it's not a valid destination address
+      // (used for binding servers to all interfaces, not for connecting)
+      if (a === 0 && b === 0 && c === 0 && d === 0) {
+        return { allowed: false, reason: 'Invalid destination address' };
+      }
+
+      // ALWAYS block link-local/cloud metadata (169.254.0.0/16) - security critical
+      // Cloud providers (AWS, GCP, Azure) use 169.254.169.254 for instance metadata
+      // which can expose sensitive credentials and configuration
+      if (a === 169 && b === 254) {
+        return { allowed: false, reason: 'Link-local/cloud metadata addresses are not allowed' };
+      }
+
+      // Check if this is a private IP range
+      const isPrivateIp =
+        a === 10 ||                           // Class A private (10.0.0.0/8)
+        (a === 192 && b === 168) ||           // Class C private (192.168.0.0/16)
+        (a === 172 && b >= 16 && b <= 31);    // Class B private (172.16.0.0/12)
+
+      if (isPrivateIp) {
+        // Allow if the IP is in one of our local subnets (same LAN)
+        if (isInLocalSubnet(hostname)) {
+          return { allowed: true };
+        }
+        // Block other private IPs not on our network
+        return { allowed: false, reason: 'Private IP addresses are not allowed (except localhost and local network)' };
+      }
+    }
+
+    return { allowed: true };
+  } catch {
+    return { allowed: false, reason: 'Invalid URL' };
+  }
 }
 
 /**
@@ -114,6 +259,17 @@ async function checkHttpHealth(server: CustomMcpServer, startTime: number): Prom
       serverId: server.id,
       status: 'unhealthy',
       message: 'No URL configured',
+      checkedAt: new Date().toISOString(),
+    };
+  }
+
+  // Defense-in-depth: Validate URL to prevent SSRF attacks
+  const urlValidation = isUrlAllowed(server.url);
+  if (!urlValidation.allowed) {
+    return {
+      serverId: server.id,
+      status: 'unhealthy',
+      message: urlValidation.reason || 'URL not allowed',
       checkedAt: new Date().toISOString(),
     };
   }
@@ -190,6 +346,17 @@ async function checkStreamableHttpHealth(server: CustomMcpServer, startTime: num
     };
   }
 
+  // Defense-in-depth: Validate URL to prevent SSRF attacks
+  const urlValidation = isUrlAllowed(server.url);
+  if (!urlValidation.allowed) {
+    return {
+      serverId: server.id,
+      status: 'unhealthy',
+      message: urlValidation.reason || 'URL not allowed',
+      checkedAt: new Date().toISOString(),
+    };
+  }
+
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10000); // 10 second timeout
@@ -262,13 +429,16 @@ async function checkCommandHealth(server: CustomMcpServer, startTime: number): P
     };
   }
 
+  // Store command in local variable for type narrowing inside Promise callback
+  const serverCommand = server.command;
+
   return new Promise((resolve) => {
     // Defense-in-depth: Validate command and args before spawn
-    if (!isCommandSafe(server.command)) {
+    if (!isCommandSafe(serverCommand)) {
       return resolve({
         serverId: server.id,
         status: 'unhealthy',
-        message: `Invalid command '${server.command}' - not in allowlist`,
+        message: `Invalid command '${serverCommand}' - not in allowlist`,
         checkedAt: new Date().toISOString(),
       });
     }
@@ -281,8 +451,8 @@ async function checkCommandHealth(server: CustomMcpServer, startTime: number): P
       });
     }
 
-    const command = isWindows() ? 'where' : 'which';
-    const proc = spawn(command, [server.command!], {
+    const whichCommand = isWindows() ? 'where' : 'which';
+    const proc = spawn(whichCommand, [serverCommand], {
       timeout: 5000,
     });
 
@@ -295,7 +465,7 @@ async function checkCommandHealth(server: CustomMcpServer, startTime: number): P
         resolve({
           serverId: server.id,
           status: 'healthy',
-          message: `Command '${server.command}' found`,
+          message: `Command '${serverCommand}' found`,
           responseTime,
           checkedAt: new Date().toISOString(),
         });
@@ -303,7 +473,7 @@ async function checkCommandHealth(server: CustomMcpServer, startTime: number): P
         resolve({
           serverId: server.id,
           status: 'unhealthy',
-          message: `Command '${server.command}' not found in PATH`,
+          message: `Command '${serverCommand}' not found in PATH`,
           responseTime,
           checkedAt: new Date().toISOString(),
         });
@@ -319,7 +489,7 @@ async function checkCommandHealth(server: CustomMcpServer, startTime: number): P
       resolve({
         serverId: server.id,
         status: 'unhealthy',
-        message: `Failed to check command '${server.command}'`,
+        message: `Failed to check command '${serverCommand}'`,
         responseTime,
         checkedAt: new Date().toISOString(),
       });
@@ -359,6 +529,16 @@ async function testHttpConnection(server: CustomMcpServer, startTime: number): P
       serverId: server.id,
       success: false,
       message: 'No URL configured',
+    };
+  }
+
+  // Defense-in-depth: Validate URL to prevent SSRF attacks
+  const urlValidation = isUrlAllowed(server.url);
+  if (!urlValidation.allowed) {
+    return {
+      serverId: server.id,
+      success: false,
+      message: urlValidation.reason || 'URL not allowed',
     };
   }
 
@@ -495,6 +675,16 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
     };
   }
 
+  // Defense-in-depth: Validate URL to prevent SSRF attacks
+  const urlValidation = isUrlAllowed(server.url);
+  if (!urlValidation.allowed) {
+    return {
+      serverId: server.id,
+      success: false,
+      message: urlValidation.reason || 'URL not allowed',
+    };
+  }
+
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 30000); // 30 second timeout
@@ -628,13 +818,16 @@ async function testCommandConnection(server: CustomMcpServer, startTime: number)
     };
   }
 
+  // Store command in local variable for type narrowing inside Promise callback
+  const serverCommand = server.command;
+
   return new Promise((resolve) => {
     // Defense-in-depth: Validate command and args before spawn
-    if (!isCommandSafe(server.command)) {
+    if (!isCommandSafe(serverCommand)) {
       return resolve({
         serverId: server.id,
         success: false,
-        message: `Invalid command '${server.command}' - not in allowlist`,
+        message: `Invalid command '${serverCommand}' - not in allowlist`,
       });
     }
     if (!areArgsSafe(server.args)) {
@@ -648,7 +841,7 @@ async function testCommandConnection(server: CustomMcpServer, startTime: number)
     const args = server.args || [];
 
     // On Windows, use shell: true to properly handle .cmd/.bat scripts like npx
-    const proc = spawn(server.command!, args, {
+    const proc = spawn(serverCommand, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       timeout: 15000, // OS-level timeout for reliable process termination
       shell: isWindows(), // Required for Windows to run npx.cmd

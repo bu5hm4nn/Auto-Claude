@@ -22,18 +22,62 @@ vi.mock('../../platform', () => ({
   isWindows: vi.fn(() => false),
 }));
 
+// Use real net module for IP validation (no need to mock - it's pure functions)
+vi.mock('net', async () => {
+  const actual = await vi.importActual<typeof import('net')>('net');
+  return actual;
+});
+
 // Mock app logger
 vi.mock('../../app-logger', () => ({
   appLog: vi.fn(),
 }));
 
+// Mock os.networkInterfaces for local subnet tests
+vi.mock('os', () => {
+  // Default mock: 192.168.1.100/24 network
+  const networkInterfacesMock = vi.fn(() => ({
+    en0: [
+      {
+        address: '192.168.1.100',
+        netmask: '255.255.255.0',
+        family: 'IPv4',
+        internal: false,
+        mac: '00:00:00:00:00:00',
+        cidr: '192.168.1.100/24',
+      },
+    ],
+    lo0: [
+      {
+        address: '127.0.0.1',
+        netmask: '255.0.0.0',
+        family: 'IPv4',
+        internal: true,
+        mac: '00:00:00:00:00:00',
+        cidr: '127.0.0.1/8',
+      },
+    ],
+  }));
+  return {
+    default: {
+      networkInterfaces: networkInterfacesMock,
+    },
+    networkInterfaces: networkInterfacesMock,
+  };
+});
+
 // Import exported security functions directly from the module
-import { isCommandSafe, areArgsSafe, mapNetworkErrorToMessage } from '../mcp-handlers';
+import { isCommandSafe, areArgsSafe, mapNetworkErrorToMessage, isUrlAllowed, ipToInt, getLocalSubnets, isInLocalSubnet, clearLocalSubnetCache } from '../mcp-handlers';
+import os from 'os';
+
+// Get reference to the mocked networkInterfaces function
+const mockNetworkInterfaces = vi.mocked(os.networkInterfaces);
 
 describe('MCP Health Check Functions', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useFakeTimers();
+    clearLocalSubnetCache();
   });
 
   afterEach(() => {
@@ -546,6 +590,732 @@ describe('MCP Health Check Functions', () => {
       expect(mapNetworkErrorToMessage('')).toBe('Connection failed');
     });
   });
+
+  describe('URL Validation Integration in Health Checks', () => {
+    describe('HTTP Health Check URL Validation', () => {
+      it('allows private IP addresses on local subnet and makes fetch call', async () => {
+        // Mock network interface is 192.168.1.100/24, so 192.168.1.1 is on the same subnet
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+        });
+
+        const { checkHttpHealth } = await importHealthCheckFunctions();
+        const server = {
+          id: 'test-server',
+          name: 'Test Server',
+          type: 'http' as const,
+          url: 'http://192.168.1.1/mcp',
+        };
+
+        const result = await checkHttpHealth(server, Date.now());
+
+        expect(result.status).toBe('healthy');
+        expect(mockFetch).toHaveBeenCalledWith(
+          'http://192.168.1.1/mcp',
+          expect.any(Object)
+        );
+      });
+
+      it('rejects private IP addresses not on local subnet', async () => {
+        // Mock network interface is 192.168.1.100/24, so 10.0.0.1 is NOT on the same subnet
+        const { checkHttpHealth } = await importHealthCheckFunctions();
+        const server = {
+          id: 'test-server',
+          name: 'Test Server',
+          type: 'http' as const,
+          url: 'http://10.0.0.1/mcp',
+        };
+
+        const result = await checkHttpHealth(server, Date.now());
+
+        expect(result.status).toBe('unhealthy');
+        expect(result.message).toBe('Private IP addresses are not allowed (except localhost and local network)');
+        expect(mockFetch).not.toHaveBeenCalled();
+      });
+
+      it('rejects cloud metadata URLs', async () => {
+        const { checkHttpHealth } = await importHealthCheckFunctions();
+        const server = {
+          id: 'test-server',
+          name: 'Test Server',
+          type: 'http' as const,
+          url: 'http://169.254.169.254/latest/meta-data',
+        };
+
+        const result = await checkHttpHealth(server, Date.now());
+
+        expect(result.status).toBe('unhealthy');
+        expect(result.message).toBe('Link-local/cloud metadata addresses are not allowed');
+        expect(mockFetch).not.toHaveBeenCalled();
+      });
+
+      it('rejects non-HTTP protocols', async () => {
+        const { checkHttpHealth } = await importHealthCheckFunctions();
+        const server = {
+          id: 'test-server',
+          name: 'Test Server',
+          type: 'http' as const,
+          url: 'ftp://example.com/mcp',
+        };
+
+        const result = await checkHttpHealth(server, Date.now());
+
+        expect(result.status).toBe('unhealthy');
+        expect(result.message).toBe('Only HTTP/HTTPS URLs are allowed');
+        expect(mockFetch).not.toHaveBeenCalled();
+      });
+
+      it('rejects URLs with embedded credentials', async () => {
+        const { checkHttpHealth } = await importHealthCheckFunctions();
+        const server = {
+          id: 'test-server',
+          name: 'Test Server',
+          type: 'http' as const,
+          url: 'https://user:pass@example.com/mcp',
+        };
+
+        const result = await checkHttpHealth(server, Date.now());
+
+        expect(result.status).toBe('unhealthy');
+        expect(result.message).toBe('URLs with embedded credentials are not allowed');
+        expect(mockFetch).not.toHaveBeenCalled();
+      });
+
+      it('allows localhost URLs and makes fetch call', async () => {
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+        });
+
+        const { checkHttpHealth } = await importHealthCheckFunctions();
+        const server = {
+          id: 'test-server',
+          name: 'Test Server',
+          type: 'http' as const,
+          url: 'http://localhost:8080/mcp',
+        };
+
+        const result = await checkHttpHealth(server, Date.now());
+
+        expect(result.status).toBe('healthy');
+        expect(mockFetch).toHaveBeenCalledWith(
+          'http://localhost:8080/mcp',
+          expect.any(Object)
+        );
+      });
+
+      it('allows public domain URLs and makes fetch call', async () => {
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+        });
+
+        const { checkHttpHealth } = await importHealthCheckFunctions();
+        const server = {
+          id: 'test-server',
+          name: 'Test Server',
+          type: 'http' as const,
+          url: 'https://api.example.com/mcp',
+        };
+
+        const result = await checkHttpHealth(server, Date.now());
+
+        expect(result.status).toBe('healthy');
+        expect(mockFetch).toHaveBeenCalledWith(
+          'https://api.example.com/mcp',
+          expect.any(Object)
+        );
+      });
+    });
+
+    describe('Streamable HTTP Health Check URL Validation', () => {
+      it('rejects private IP addresses not on local subnet', async () => {
+        // Mock network interface is 192.168.1.100/24, so 10.0.0.1 is NOT on the same subnet
+        const { checkStreamableHttpHealth } = await importHealthCheckFunctions();
+        const server = {
+          id: 'test-server',
+          name: 'Test Streamable Server',
+          type: 'streamable-http' as const,
+          url: 'http://10.0.0.1/mcp',
+        };
+
+        const result = await checkStreamableHttpHealth(server, Date.now());
+
+        expect(result.status).toBe('unhealthy');
+        expect(result.message).toBe('Private IP addresses are not allowed (except localhost and local network)');
+        expect(mockFetch).not.toHaveBeenCalled();
+      });
+
+      it('rejects Class B private network ranges not on local subnet', async () => {
+        // Mock network interface is 192.168.1.100/24, so 172.16.0.1 is NOT on the same subnet
+        const { checkStreamableHttpHealth } = await importHealthCheckFunctions();
+        const server = {
+          id: 'test-server',
+          name: 'Test Streamable Server',
+          type: 'streamable-http' as const,
+          url: 'http://172.16.0.1/mcp',
+        };
+
+        const result = await checkStreamableHttpHealth(server, Date.now());
+
+        expect(result.status).toBe('unhealthy');
+        expect(result.message).toBe('Private IP addresses are not allowed (except localhost and local network)');
+        expect(mockFetch).not.toHaveBeenCalled();
+      });
+
+      it('rejects file:// protocol URLs', async () => {
+        const { checkStreamableHttpHealth } = await importHealthCheckFunctions();
+        const server = {
+          id: 'test-server',
+          name: 'Test Streamable Server',
+          type: 'streamable-http' as const,
+          url: 'file:///etc/passwd',
+        };
+
+        const result = await checkStreamableHttpHealth(server, Date.now());
+
+        expect(result.status).toBe('unhealthy');
+        expect(result.message).toBe('Only HTTP/HTTPS URLs are allowed');
+        expect(mockFetch).not.toHaveBeenCalled();
+      });
+
+      it('rejects javascript: protocol URLs', async () => {
+        const { checkStreamableHttpHealth } = await importHealthCheckFunctions();
+        const server = {
+          id: 'test-server',
+          name: 'Test Streamable Server',
+          type: 'streamable-http' as const,
+          url: 'javascript:alert(1)',
+        };
+
+        const result = await checkStreamableHttpHealth(server, Date.now());
+
+        expect(result.status).toBe('unhealthy');
+        expect(result.message).toBe('Only HTTP/HTTPS URLs are allowed');
+        expect(mockFetch).not.toHaveBeenCalled();
+      });
+
+      it('allows localhost with IPv6 loopback', async () => {
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+        });
+
+        const { checkStreamableHttpHealth } = await importHealthCheckFunctions();
+        const server = {
+          id: 'test-server',
+          name: 'Test Streamable Server',
+          type: 'streamable-http' as const,
+          url: 'http://[::1]:8080/mcp',
+        };
+
+        const result = await checkStreamableHttpHealth(server, Date.now());
+
+        expect(result.status).toBe('healthy');
+        expect(mockFetch).toHaveBeenCalledWith(
+          'http://[::1]:8080/mcp',
+          expect.any(Object)
+        );
+      });
+
+      it('allows public HTTPS URLs and makes fetch call', async () => {
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+        });
+
+        const { checkStreamableHttpHealth } = await importHealthCheckFunctions();
+        const server = {
+          id: 'test-server',
+          name: 'Test Streamable Server',
+          type: 'streamable-http' as const,
+          url: 'https://mcp.example.com/stream',
+        };
+
+        const result = await checkStreamableHttpHealth(server, Date.now());
+
+        expect(result.status).toBe('healthy');
+        expect(mockFetch).toHaveBeenCalledWith(
+          'https://mcp.example.com/stream',
+          expect.any(Object)
+        );
+      });
+    });
+  });
+
+  describe('Local Subnet Discovery', () => {
+    describe('ipToInt', () => {
+      it('converts IPv4 addresses to 32-bit unsigned integers', () => {
+        expect(ipToInt('0.0.0.0')).toBe(0);
+        expect(ipToInt('255.255.255.255')).toBe(0xFFFFFFFF);
+        expect(ipToInt('192.168.1.100')).toBe(0xC0A80164);
+        expect(ipToInt('10.0.0.1')).toBe(0x0A000001);
+        expect(ipToInt('127.0.0.1')).toBe(0x7F000001);
+      });
+
+      it('handles edge cases correctly', () => {
+        expect(ipToInt('1.2.3.4')).toBe((1 << 24) + (2 << 16) + (3 << 8) + 4);
+        expect(ipToInt('255.0.0.0')).toBe(0xFF000000);
+        expect(ipToInt('0.255.0.0')).toBe(0x00FF0000);
+      });
+
+      it('returns -1 for invalid IP addresses', () => {
+        // Octets out of range
+        expect(ipToInt('256.0.0.0')).toBe(-1);
+        expect(ipToInt('0.0.0.256')).toBe(-1);
+        expect(ipToInt('999.999.999.999')).toBe(-1);
+        expect(ipToInt('-1.0.0.0')).toBe(-1);
+
+        // Wrong number of octets
+        expect(ipToInt('1.2.3')).toBe(-1);
+        expect(ipToInt('1.2.3.4.5')).toBe(-1);
+        expect(ipToInt('192.168.1')).toBe(-1);
+
+        // Non-numeric octets
+        expect(ipToInt('a.b.c.d')).toBe(-1);
+        expect(ipToInt('192.168.1.x')).toBe(-1);
+
+        // parseInt-permissive forms that must be rejected
+        expect(ipToInt('1e2.0.0.1')).toBe(-1);
+        expect(ipToInt('1.2.3.4 ')).toBe(-1);
+        expect(ipToInt(' 1.2.3.4')).toBe(-1);
+        expect(ipToInt('1.2.3.04x')).toBe(-1);
+        expect(ipToInt('+1.2.3.4')).toBe(-1);
+        expect(ipToInt('1.2.3.4\n')).toBe(-1);
+
+        // Empty or malformed
+        expect(ipToInt('')).toBe(-1);
+        expect(ipToInt('...')).toBe(-1);
+      });
+    });
+
+    describe('getLocalSubnets', () => {
+      it('returns subnet information from network interfaces', () => {
+        const subnets = getLocalSubnets();
+
+        expect(subnets).toHaveLength(1);
+        expect(subnets[0]).toEqual({
+          address: ipToInt('192.168.1.100'),
+          mask: ipToInt('255.255.255.0'),
+        });
+      });
+
+      it('excludes internal/loopback interfaces', () => {
+        const subnets = getLocalSubnets();
+
+        // Should not include the lo0 (loopback) interface
+        const hasLoopback = subnets.some(s => s.address === ipToInt('127.0.0.1'));
+        expect(hasLoopback).toBe(false);
+      });
+
+      it('caches results across calls', () => {
+        clearLocalSubnetCache();
+        mockNetworkInterfaces.mockClear();
+        const subnets1 = getLocalSubnets();
+        const subnets2 = getLocalSubnets();
+
+        expect(subnets1).toBe(subnets2); // Same reference (cached)
+        expect(mockNetworkInterfaces).toHaveBeenCalledTimes(1);
+      });
+
+      it('returns fresh results after cache clear', () => {
+        clearLocalSubnetCache();
+        mockNetworkInterfaces.mockClear();
+        getLocalSubnets();
+        clearLocalSubnetCache();
+        getLocalSubnets();
+
+        expect(mockNetworkInterfaces).toHaveBeenCalledTimes(2);
+      });
+    });
+
+    describe('isInLocalSubnet', () => {
+      beforeEach(() => {
+        clearLocalSubnetCache();
+        // Reset to default mock (192.168.1.100/24)
+        mockNetworkInterfaces.mockImplementation(() => ({
+          en0: [
+            {
+              address: '192.168.1.100',
+              netmask: '255.255.255.0',
+              family: 'IPv4',
+              internal: false,
+              mac: '00:00:00:00:00:00',
+              cidr: '192.168.1.100/24',
+            },
+          ],
+        }));
+      });
+
+      it('returns true for IPs in the same subnet', () => {
+        expect(isInLocalSubnet('192.168.1.1')).toBe(true);
+        expect(isInLocalSubnet('192.168.1.100')).toBe(true);
+        expect(isInLocalSubnet('192.168.1.254')).toBe(true);
+      });
+
+      it('returns false for IPs outside the subnet', () => {
+        expect(isInLocalSubnet('192.168.2.1')).toBe(false);
+        expect(isInLocalSubnet('10.0.0.1')).toBe(false);
+        expect(isInLocalSubnet('172.16.0.1')).toBe(false);
+      });
+
+      it('returns false for invalid IP addresses', () => {
+        expect(isInLocalSubnet('256.0.0.0')).toBe(false);
+        expect(isInLocalSubnet('999.999.999.999')).toBe(false);
+        expect(isInLocalSubnet('1.2.3')).toBe(false);
+        expect(isInLocalSubnet('not.an.ip')).toBe(false);
+
+        // parseInt-permissive forms that must be rejected
+        expect(isInLocalSubnet('1e2.0.0.1')).toBe(false);
+        expect(isInLocalSubnet('1.2.3.4 ')).toBe(false);
+        expect(isInLocalSubnet(' 1.2.3.4')).toBe(false);
+      });
+
+      it('handles multiple network interfaces', () => {
+        mockNetworkInterfaces.mockImplementation(() => ({
+          en0: [
+            {
+              address: '192.168.1.100',
+              netmask: '255.255.255.0',
+              family: 'IPv4',
+              internal: false,
+              mac: '00:00:00:00:00:00',
+              cidr: '192.168.1.100/24',
+            },
+          ],
+          eth1: [
+            {
+              address: '10.10.10.50',
+              netmask: '255.255.255.0',
+              family: 'IPv4',
+              internal: false,
+              mac: '00:00:00:00:00:01',
+              cidr: '10.10.10.50/24',
+            },
+          ],
+        }));
+        clearLocalSubnetCache();
+
+        // Should be in either subnet
+        expect(isInLocalSubnet('192.168.1.1')).toBe(true);
+        expect(isInLocalSubnet('10.10.10.1')).toBe(true);
+
+        // Should not be in either subnet
+        expect(isInLocalSubnet('10.10.11.1')).toBe(false);
+        expect(isInLocalSubnet('192.168.2.1')).toBe(false);
+      });
+
+      it('returns false when no external interfaces exist', () => {
+        mockNetworkInterfaces.mockImplementation(() => ({
+          lo0: [
+            {
+              address: '127.0.0.1',
+              netmask: '255.0.0.0',
+              family: 'IPv4',
+              internal: true,
+              mac: '00:00:00:00:00:00',
+              cidr: '127.0.0.1/8',
+            },
+          ],
+        }));
+        clearLocalSubnetCache();
+
+        expect(isInLocalSubnet('192.168.1.1')).toBe(false);
+        expect(isInLocalSubnet('10.0.0.1')).toBe(false);
+      });
+
+      it('handles different subnet masks correctly', () => {
+        mockNetworkInterfaces.mockImplementation(() => ({
+          en0: [
+            {
+              address: '10.0.0.100',
+              netmask: '255.0.0.0',  // /8 subnet
+              family: 'IPv4',
+              internal: false,
+              mac: '00:00:00:00:00:00',
+              cidr: '10.0.0.100/8',
+            },
+          ],
+        }));
+        clearLocalSubnetCache();
+
+        // Entire 10.x.x.x range should be in subnet with /8 mask
+        expect(isInLocalSubnet('10.0.0.1')).toBe(true);
+        expect(isInLocalSubnet('10.255.255.254')).toBe(true);
+        expect(isInLocalSubnet('10.100.50.25')).toBe(true);
+
+        // Other ranges should not be
+        expect(isInLocalSubnet('192.168.1.1')).toBe(false);
+      });
+    });
+  });
+
+  describe('URL Security Validation', () => {
+    describe('Protocol Validation', () => {
+      it('allows http and https URLs', () => {
+        expect(isUrlAllowed('http://example.com')).toEqual({ allowed: true });
+        expect(isUrlAllowed('https://example.com')).toEqual({ allowed: true });
+      });
+
+      it('rejects non-http/https protocols', () => {
+        expect(isUrlAllowed('ftp://example.com')).toEqual({
+          allowed: false,
+          reason: 'Only HTTP/HTTPS URLs are allowed',
+        });
+        expect(isUrlAllowed('file:///etc/passwd')).toEqual({
+          allowed: false,
+          reason: 'Only HTTP/HTTPS URLs are allowed',
+        });
+        expect(isUrlAllowed('javascript:alert(1)')).toEqual({
+          allowed: false,
+          reason: 'Only HTTP/HTTPS URLs are allowed',
+        });
+        expect(isUrlAllowed('data:text/html,<script>alert(1)</script>')).toEqual({
+          allowed: false,
+          reason: 'Only HTTP/HTTPS URLs are allowed',
+        });
+      });
+    });
+
+    describe('Embedded Credentials', () => {
+      it('blocks URLs with username', () => {
+        expect(isUrlAllowed('https://user@example.com')).toEqual({
+          allowed: false,
+          reason: 'URLs with embedded credentials are not allowed',
+        });
+      });
+
+      it('blocks URLs with username and password', () => {
+        expect(isUrlAllowed('https://user:pass@example.com')).toEqual({
+          allowed: false,
+          reason: 'URLs with embedded credentials are not allowed',
+        });
+      });
+
+      it('blocks URLs with only password', () => {
+        expect(isUrlAllowed('https://:pass@example.com')).toEqual({
+          allowed: false,
+          reason: 'URLs with embedded credentials are not allowed',
+        });
+      });
+    });
+
+    describe('Localhost Allowance', () => {
+      it('allows localhost hostname', () => {
+        expect(isUrlAllowed('http://localhost:8080')).toEqual({ allowed: true });
+        expect(isUrlAllowed('https://localhost')).toEqual({ allowed: true });
+      });
+
+      it('allows 127.0.0.1 IPv4 loopback', () => {
+        expect(isUrlAllowed('http://127.0.0.1:3000')).toEqual({ allowed: true });
+        expect(isUrlAllowed('https://127.0.0.1')).toEqual({ allowed: true });
+      });
+
+      it('allows ::1 IPv6 loopback', () => {
+        expect(isUrlAllowed('http://[::1]:8080')).toEqual({ allowed: true });
+        expect(isUrlAllowed('https://[::1]')).toEqual({ allowed: true });
+      });
+
+      it('handles case-insensitive localhost', () => {
+        expect(isUrlAllowed('http://LOCALHOST:8080')).toEqual({ allowed: true });
+        expect(isUrlAllowed('https://LoCaLhOsT')).toEqual({ allowed: true });
+      });
+    });
+
+    describe('Private IP Blocking and Local Subnet Allowance', () => {
+      beforeEach(() => {
+        clearLocalSubnetCache();
+        // Reset to default mock (192.168.1.100/24)
+        mockNetworkInterfaces.mockImplementation(() => ({
+          en0: [
+            {
+              address: '192.168.1.100',
+              netmask: '255.255.255.0',
+              family: 'IPv4',
+              internal: false,
+              mac: '00:00:00:00:00:00',
+              cidr: '192.168.1.100/24',
+            },
+          ],
+        }));
+      });
+
+      it('allows Class A private network IPs if on local subnet', () => {
+        // Configure mock to have a 10.x.x.x subnet
+        mockNetworkInterfaces.mockImplementation(() => ({
+          eth0: [
+            {
+              address: '10.0.0.100',
+              netmask: '255.255.255.0',
+              family: 'IPv4',
+              internal: false,
+              mac: '00:00:00:00:00:00',
+              cidr: '10.0.0.100/24',
+            },
+          ],
+        }));
+        clearLocalSubnetCache();
+
+        expect(isUrlAllowed('http://10.0.0.1')).toEqual({ allowed: true });
+        expect(isUrlAllowed('http://10.0.0.254')).toEqual({ allowed: true });
+      });
+
+      it('blocks Class A private network IPs not on local subnet', () => {
+        // Mock network interface is 192.168.1.100/24, so 10.x.x.x is NOT on the same subnet
+        expect(isUrlAllowed('http://10.0.0.1')).toEqual({
+          allowed: false,
+          reason: 'Private IP addresses are not allowed (except localhost and local network)',
+        });
+        expect(isUrlAllowed('http://10.255.255.255')).toEqual({
+          allowed: false,
+          reason: 'Private IP addresses are not allowed (except localhost and local network)',
+        });
+        expect(isUrlAllowed('http://10.1.2.3:8080')).toEqual({
+          allowed: false,
+          reason: 'Private IP addresses are not allowed (except localhost and local network)',
+        });
+      });
+
+      it('blocks 0.0.0.0 as invalid destination', () => {
+        expect(isUrlAllowed('http://0.0.0.0')).toEqual({
+          allowed: false,
+          reason: 'Invalid destination address',
+        });
+        expect(isUrlAllowed('http://0.0.0.0:8080')).toEqual({
+          allowed: false,
+          reason: 'Invalid destination address',
+        });
+      });
+
+      it('always blocks link-local/cloud metadata network (169.254.0.0/16)', () => {
+        // Even if somehow in a local subnet, 169.254.x.x must always be blocked
+        expect(isUrlAllowed('http://169.254.0.1')).toEqual({
+          allowed: false,
+          reason: 'Link-local/cloud metadata addresses are not allowed',
+        });
+        expect(isUrlAllowed('http://169.254.169.254')).toEqual({
+          allowed: false,
+          reason: 'Link-local/cloud metadata addresses are not allowed',
+        });
+        expect(isUrlAllowed('http://169.254.255.255')).toEqual({
+          allowed: false,
+          reason: 'Link-local/cloud metadata addresses are not allowed',
+        });
+      });
+
+      it('allows Class C private network IPs if on local subnet', () => {
+        // Mock network interface is 192.168.1.100/24
+        expect(isUrlAllowed('http://192.168.1.1')).toEqual({ allowed: true });
+        expect(isUrlAllowed('http://192.168.1.254')).toEqual({ allowed: true });
+        expect(isUrlAllowed('http://192.168.1.50:3000')).toEqual({ allowed: true });
+      });
+
+      it('blocks Class C private network IPs not on local subnet', () => {
+        // Mock network interface is 192.168.1.100/24, so 192.168.2.x is NOT on the same subnet
+        expect(isUrlAllowed('http://192.168.2.1')).toEqual({
+          allowed: false,
+          reason: 'Private IP addresses are not allowed (except localhost and local network)',
+        });
+        expect(isUrlAllowed('http://192.168.0.1')).toEqual({
+          allowed: false,
+          reason: 'Private IP addresses are not allowed (except localhost and local network)',
+        });
+      });
+
+      it('blocks Class B private network (172.16.0.0/12) not on local subnet', () => {
+        // Mock network interface is 192.168.1.100/24, so 172.x.x.x is NOT on the same subnet
+        expect(isUrlAllowed('http://172.16.0.1')).toEqual({
+          allowed: false,
+          reason: 'Private IP addresses are not allowed (except localhost and local network)',
+        });
+        expect(isUrlAllowed('http://172.20.10.50')).toEqual({
+          allowed: false,
+          reason: 'Private IP addresses are not allowed (except localhost and local network)',
+        });
+        expect(isUrlAllowed('http://172.31.255.255')).toEqual({
+          allowed: false,
+          reason: 'Private IP addresses are not allowed (except localhost and local network)',
+        });
+      });
+
+      it('allows 172.x IPs outside private range', () => {
+        // 172.15.x.x (below 172.16.0.0)
+        expect(isUrlAllowed('http://172.15.0.1')).toEqual({ allowed: true });
+        // 172.32.x.x (above 172.31.255.255)
+        expect(isUrlAllowed('http://172.32.0.1')).toEqual({ allowed: true });
+      });
+    });
+
+    describe('Public IP Allowance', () => {
+      it('allows public IPv4 addresses', () => {
+        expect(isUrlAllowed('http://8.8.8.8')).toEqual({ allowed: true });
+        expect(isUrlAllowed('https://1.1.1.1')).toEqual({ allowed: true });
+        expect(isUrlAllowed('http://93.184.216.34')).toEqual({ allowed: true });
+      });
+
+      it('allows public domain names', () => {
+        expect(isUrlAllowed('https://example.com')).toEqual({ allowed: true });
+        expect(isUrlAllowed('https://api.example.com:8443')).toEqual({ allowed: true });
+        expect(isUrlAllowed('http://subdomain.example.org/path')).toEqual({ allowed: true });
+      });
+    });
+
+    describe('Invalid URL Handling', () => {
+      it('rejects malformed URLs', () => {
+        expect(isUrlAllowed('not a url')).toEqual({
+          allowed: false,
+          reason: 'Invalid URL',
+        });
+        expect(isUrlAllowed('http://')).toEqual({
+          allowed: false,
+          reason: 'Invalid URL',
+        });
+        expect(isUrlAllowed('')).toEqual({
+          allowed: false,
+          reason: 'Invalid URL',
+        });
+        expect(isUrlAllowed('://example.com')).toEqual({
+          allowed: false,
+          reason: 'Invalid URL',
+        });
+      });
+    });
+
+    describe('Edge Cases', () => {
+      it('handles URLs with ports', () => {
+        expect(isUrlAllowed('http://localhost:8080')).toEqual({ allowed: true });
+        expect(isUrlAllowed('https://example.com:443')).toEqual({ allowed: true });
+        // 10.0.0.1 is not on our mock local subnet (192.168.1.0/24)
+        expect(isUrlAllowed('http://10.0.0.1:3000')).toEqual({
+          allowed: false,
+          reason: 'Private IP addresses are not allowed (except localhost and local network)',
+        });
+      });
+
+      it('handles URLs with paths and query params', () => {
+        expect(isUrlAllowed('https://example.com/api/v1')).toEqual({ allowed: true });
+        expect(isUrlAllowed('https://example.com/path?query=value')).toEqual({ allowed: true });
+        expect(isUrlAllowed('http://localhost:8080/mcp?test=1')).toEqual({ allowed: true });
+      });
+
+      it('handles URLs with fragments', () => {
+        expect(isUrlAllowed('https://example.com#fragment')).toEqual({ allowed: true });
+        expect(isUrlAllowed('https://example.com/path#section')).toEqual({ allowed: true });
+      });
+
+      it('handles IPv6 addresses (if supported by URL constructor)', () => {
+        // IPv6 loopback already tested above
+        // Test other IPv6 (note: private IPv6 detection would require more complex logic)
+        expect(isUrlAllowed('http://[2001:db8::1]')).toEqual({ allowed: true });
+      });
+    });
+  });
 });
 
 /**
@@ -596,6 +1366,17 @@ async function importHealthCheckFunctions() {
         serverId: server.id,
         status: 'unhealthy',
         message: 'No URL configured',
+        checkedAt: new Date().toISOString(),
+      };
+    }
+
+    // Defense-in-depth: Validate URL to prevent SSRF attacks
+    const urlValidation = isUrlAllowed(server.url);
+    if (!urlValidation.allowed) {
+      return {
+        serverId: server.id,
+        status: 'unhealthy',
+        message: urlValidation.reason || 'URL not allowed',
         checkedAt: new Date().toISOString(),
       };
     }
@@ -666,6 +1447,17 @@ async function importHealthCheckFunctions() {
         serverId: server.id,
         status: 'unhealthy',
         message: 'No URL configured',
+        checkedAt: new Date().toISOString(),
+      };
+    }
+
+    // Defense-in-depth: Validate URL to prevent SSRF attacks
+    const urlValidation = isUrlAllowed(server.url);
+    if (!urlValidation.allowed) {
+      return {
+        serverId: server.id,
+        status: 'unhealthy',
+        message: urlValidation.reason || 'URL not allowed',
         checkedAt: new Date().toISOString(),
       };
     }
