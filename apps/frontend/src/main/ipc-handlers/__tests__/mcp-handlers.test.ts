@@ -547,6 +547,236 @@ describe('MCP Health Check Functions', () => {
     });
   });
 
+  describe('URL Validation Integration in Health Checks', () => {
+    describe('HTTP Health Check URL Validation', () => {
+      it('rejects private IP addresses and does not make fetch call', async () => {
+        const { checkHttpHealth } = await importHealthCheckFunctions();
+        const server = {
+          id: 'test-server',
+          name: 'Test Server',
+          type: 'http' as const,
+          url: 'http://192.168.1.1/mcp',
+        };
+
+        const result = await checkHttpHealth(server, Date.now());
+
+        expect(result.status).toBe('unhealthy');
+        expect(result.message).toBe('Private IP addresses are not allowed (except localhost)');
+        expect(mockFetch).not.toHaveBeenCalled();
+      });
+
+      it('rejects cloud metadata URLs', async () => {
+        const { checkHttpHealth } = await importHealthCheckFunctions();
+        const server = {
+          id: 'test-server',
+          name: 'Test Server',
+          type: 'http' as const,
+          url: 'http://169.254.169.254/latest/meta-data',
+        };
+
+        const result = await checkHttpHealth(server, Date.now());
+
+        expect(result.status).toBe('unhealthy');
+        expect(result.message).toBe('Private IP addresses are not allowed (except localhost)');
+        expect(mockFetch).not.toHaveBeenCalled();
+      });
+
+      it('rejects non-HTTP protocols', async () => {
+        const { checkHttpHealth } = await importHealthCheckFunctions();
+        const server = {
+          id: 'test-server',
+          name: 'Test Server',
+          type: 'http' as const,
+          url: 'ftp://example.com/mcp',
+        };
+
+        const result = await checkHttpHealth(server, Date.now());
+
+        expect(result.status).toBe('unhealthy');
+        expect(result.message).toBe('Only HTTP/HTTPS URLs are allowed');
+        expect(mockFetch).not.toHaveBeenCalled();
+      });
+
+      it('rejects URLs with embedded credentials', async () => {
+        const { checkHttpHealth } = await importHealthCheckFunctions();
+        const server = {
+          id: 'test-server',
+          name: 'Test Server',
+          type: 'http' as const,
+          url: 'https://user:pass@example.com/mcp',
+        };
+
+        const result = await checkHttpHealth(server, Date.now());
+
+        expect(result.status).toBe('unhealthy');
+        expect(result.message).toBe('URLs with embedded credentials are not allowed');
+        expect(mockFetch).not.toHaveBeenCalled();
+      });
+
+      it('allows localhost URLs and makes fetch call', async () => {
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+        });
+
+        const { checkHttpHealth } = await importHealthCheckFunctions();
+        const server = {
+          id: 'test-server',
+          name: 'Test Server',
+          type: 'http' as const,
+          url: 'http://localhost:8080/mcp',
+        };
+
+        const result = await checkHttpHealth(server, Date.now());
+
+        expect(result.status).toBe('healthy');
+        expect(mockFetch).toHaveBeenCalledWith(
+          'http://localhost:8080/mcp',
+          expect.any(Object)
+        );
+      });
+
+      it('allows public domain URLs and makes fetch call', async () => {
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+        });
+
+        const { checkHttpHealth } = await importHealthCheckFunctions();
+        const server = {
+          id: 'test-server',
+          name: 'Test Server',
+          type: 'http' as const,
+          url: 'https://api.example.com/mcp',
+        };
+
+        const result = await checkHttpHealth(server, Date.now());
+
+        expect(result.status).toBe('healthy');
+        expect(mockFetch).toHaveBeenCalledWith(
+          'https://api.example.com/mcp',
+          expect.any(Object)
+        );
+      });
+    });
+
+    describe('Streamable HTTP Health Check URL Validation', () => {
+      it('rejects private IP addresses and does not make fetch call', async () => {
+        const { checkStreamableHttpHealth } = await importHealthCheckFunctions();
+        const server = {
+          id: 'test-server',
+          name: 'Test Streamable Server',
+          type: 'streamable-http' as const,
+          url: 'http://10.0.0.1/mcp',
+        };
+
+        const result = await checkStreamableHttpHealth(server, Date.now());
+
+        expect(result.status).toBe('unhealthy');
+        expect(result.message).toBe('Private IP addresses are not allowed (except localhost)');
+        expect(mockFetch).not.toHaveBeenCalled();
+      });
+
+      it('rejects Class B private network ranges', async () => {
+        const { checkStreamableHttpHealth } = await importHealthCheckFunctions();
+        const server = {
+          id: 'test-server',
+          name: 'Test Streamable Server',
+          type: 'streamable-http' as const,
+          url: 'http://172.16.0.1/mcp',
+        };
+
+        const result = await checkStreamableHttpHealth(server, Date.now());
+
+        expect(result.status).toBe('unhealthy');
+        expect(result.message).toBe('Private IP addresses are not allowed (except localhost)');
+        expect(mockFetch).not.toHaveBeenCalled();
+      });
+
+      it('rejects file:// protocol URLs', async () => {
+        const { checkStreamableHttpHealth } = await importHealthCheckFunctions();
+        const server = {
+          id: 'test-server',
+          name: 'Test Streamable Server',
+          type: 'streamable-http' as const,
+          url: 'file:///etc/passwd',
+        };
+
+        const result = await checkStreamableHttpHealth(server, Date.now());
+
+        expect(result.status).toBe('unhealthy');
+        expect(result.message).toBe('Only HTTP/HTTPS URLs are allowed');
+        expect(mockFetch).not.toHaveBeenCalled();
+      });
+
+      it('rejects javascript: protocol URLs', async () => {
+        const { checkStreamableHttpHealth } = await importHealthCheckFunctions();
+        const server = {
+          id: 'test-server',
+          name: 'Test Streamable Server',
+          type: 'streamable-http' as const,
+          url: 'javascript:alert(1)',
+        };
+
+        const result = await checkStreamableHttpHealth(server, Date.now());
+
+        expect(result.status).toBe('unhealthy');
+        expect(result.message).toBe('Only HTTP/HTTPS URLs are allowed');
+        expect(mockFetch).not.toHaveBeenCalled();
+      });
+
+      it('allows localhost with IPv6 loopback', async () => {
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+        });
+
+        const { checkStreamableHttpHealth } = await importHealthCheckFunctions();
+        const server = {
+          id: 'test-server',
+          name: 'Test Streamable Server',
+          type: 'streamable-http' as const,
+          url: 'http://[::1]:8080/mcp',
+        };
+
+        const result = await checkStreamableHttpHealth(server, Date.now());
+
+        expect(result.status).toBe('healthy');
+        expect(mockFetch).toHaveBeenCalledWith(
+          'http://[::1]:8080/mcp',
+          expect.any(Object)
+        );
+      });
+
+      it('allows public HTTPS URLs and makes fetch call', async () => {
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+        });
+
+        const { checkStreamableHttpHealth } = await importHealthCheckFunctions();
+        const server = {
+          id: 'test-server',
+          name: 'Test Streamable Server',
+          type: 'streamable-http' as const,
+          url: 'https://mcp.example.com/stream',
+        };
+
+        const result = await checkStreamableHttpHealth(server, Date.now());
+
+        expect(result.status).toBe('healthy');
+        expect(mockFetch).toHaveBeenCalledWith(
+          'https://mcp.example.com/stream',
+          expect.any(Object)
+        );
+      });
+    });
+  });
+
   describe('URL Security Validation', () => {
     describe('Protocol Validation', () => {
       it('allows http and https URLs', () => {
@@ -805,6 +1035,17 @@ async function importHealthCheckFunctions() {
       };
     }
 
+    // Defense-in-depth: Validate URL to prevent SSRF attacks
+    const urlValidation = isUrlAllowed(server.url);
+    if (!urlValidation.allowed) {
+      return {
+        serverId: server.id,
+        status: 'unhealthy',
+        message: urlValidation.reason || 'URL not allowed',
+        checkedAt: new Date().toISOString(),
+      };
+    }
+
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 10000);
@@ -871,6 +1112,17 @@ async function importHealthCheckFunctions() {
         serverId: server.id,
         status: 'unhealthy',
         message: 'No URL configured',
+        checkedAt: new Date().toISOString(),
+      };
+    }
+
+    // Defense-in-depth: Validate URL to prevent SSRF attacks
+    const urlValidation = isUrlAllowed(server.url);
+    if (!urlValidation.allowed) {
+      return {
+        serverId: server.id,
+        status: 'unhealthy',
+        message: urlValidation.reason || 'URL not allowed',
         checkedAt: new Date().toISOString(),
       };
     }
