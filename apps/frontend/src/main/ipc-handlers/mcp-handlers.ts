@@ -53,9 +53,18 @@ let cachedLocalSubnets: LocalSubnet[] | null = null;
 
 /**
  * Convert an IPv4 address string to a 32-bit unsigned integer.
+ * Returns -1 for invalid IP addresses (malformed or octets out of range).
  */
 export function ipToInt(ip: string): number {
-  return ip.split('.').reduce((acc, octet) => (acc << 8) + parseInt(octet, 10), 0) >>> 0;
+  const parts = ip.split('.');
+  if (parts.length !== 4) return -1;
+
+  const octets = parts.map(p => parseInt(p, 10));
+  if (octets.some(o => isNaN(o) || o < 0 || o > 255)) {
+    return -1;
+  }
+
+  return octets.reduce((acc, octet) => (acc << 8) + octet, 0) >>> 0;
 }
 
 /**
@@ -95,9 +104,12 @@ export function clearLocalSubnetCache(): void {
 /**
  * Check if an IPv4 address is within one of the local subnets.
  * This allows access to MCP servers on the same LAN as this machine.
+ * Returns false for invalid IP addresses.
  */
 export function isInLocalSubnet(ip: string): boolean {
   const ipInt = ipToInt(ip);
+  if (ipInt === -1) return false; // Invalid IP address
+
   const subnets = getLocalSubnets();
 
   return subnets.some(subnet =>
