@@ -86,6 +86,37 @@ def mark_test_complete(confirmation: str) -> str:
 
 
 # =============================================================================
+# CUSTOM HTTP ENDPOINTS
+# =============================================================================
+
+
+def add_custom_endpoints(app):
+    """
+    Add custom HTTP endpoints to the FastAPI app.
+
+    Args:
+        app: The FastAPI/Starlette application instance
+    """
+    from fastapi.responses import JSONResponse
+
+    @app.get("/test-status")
+    async def test_status():
+        """
+        Get the current test completion status.
+
+        Returns:
+            JSONResponse: Status indicating if test is complete and token matched
+        """
+        with test_complete_lock:
+            return JSONResponse(
+                content={
+                    "complete": TEST_COMPLETE_FLAG,
+                    "token_matched": TEST_COMPLETE_FLAG,
+                }
+            )
+
+
+# =============================================================================
 # MAIN ENTRY POINT
 # =============================================================================
 
@@ -106,5 +137,12 @@ if __name__ == "__main__":
     print(f"SECRET_TOKEN={SECRET_TOKEN}")
     sys.stdout.flush()
 
-    # Start the MCP server with streamable-http transport
-    mcp.run(transport="streamable-http", port=args.port)
+    # Create the FastAPI app with MCP capabilities
+    app = mcp.streamable_http_app()
+
+    # Add custom HTTP endpoints
+    add_custom_endpoints(app)
+
+    # Start the server
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=args.port)
