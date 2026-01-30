@@ -65,6 +65,52 @@ export function areArgsSafe(args: string[] | undefined): boolean {
 }
 
 /**
+ * Defense-in-depth: URL validation to prevent SSRF attacks
+ * Validates that URLs used in MCP HTTP handlers don't target internal/private networks
+ */
+export function isUrlAllowed(url: string): { allowed: boolean; reason?: string } {
+  try {
+    const parsed = new URL(url);
+
+    // Only allow http/https protocols
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return { allowed: false, reason: 'Only HTTP/HTTPS URLs are allowed' };
+    }
+
+    // Block embedded credentials to prevent credential leakage
+    if (parsed.username || parsed.password) {
+      return { allowed: false, reason: 'URLs with embedded credentials are not allowed' };
+    }
+
+    // Allow localhost explicitly for local MCP servers
+    const hostname = parsed.hostname.toLowerCase();
+    if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1') {
+      return { allowed: true };
+    }
+
+    // Block private IP ranges to prevent SSRF attacks on internal networks
+    const ipMatch = hostname.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+    if (ipMatch) {
+      const [, a, b] = ipMatch.map(Number);
+      // Block Class A private (10.0.0.0/8)
+      // Block link-local/cloud metadata (169.254.0.0/16)
+      // Block Class C private (192.168.0.0/16)
+      // Block Class B private (172.16.0.0/12)
+      if (a === 10 ||
+          (a === 169 && b === 254) ||
+          (a === 192 && b === 168) ||
+          (a === 172 && b >= 16 && b <= 31)) {
+        return { allowed: false, reason: 'Private IP addresses are not allowed (except localhost)' };
+      }
+    }
+
+    return { allowed: true };
+  } catch {
+    return { allowed: false, reason: 'Invalid URL' };
+  }
+}
+
+/**
  * Map raw network error messages to user-friendly messages.
  * This prevents exposing internal error details to users.
  */
