@@ -280,28 +280,19 @@ This is a validation test - complete both steps."""
             f"Output: {output}"
         )
 
-        # TODO(subtask-1-3): Add verification via /test-status endpoint
-        # Once the /test-status endpoint is added to the test server, verify:
-        # - GET {server_url}/test-status returns {"complete": true, "token_matched": true}
-        #
-        # For now, we verify that:
-        # 1. Claude received the token (checked above)
-        # 2. Claude successfully called both tools (checked by looking for success indicators)
+        # Verify server-side completion flag via /test-status endpoint
+        test_status_url = f"{server_url}/test-status"
+        status_response = requests.get(test_status_url, timeout=5)
+        assert status_response.status_code == 200, (
+            f"/test-status endpoint returned {status_response.status_code}"
+        )
 
-        # Check for success indicators in output
-        success_indicators = [
-            "test marked complete",
-            "marked complete",
-            "validation test",
-            "completed both steps"
-        ]
-
-        output_lower = output.lower()
-        has_success_indicator = any(indicator in output_lower for indicator in success_indicators)
-
-        assert has_success_indicator, (
-            f"Expected success indicator not found in Claude's response.\n"
-            f"Output: {output}"
+        status_data = status_response.json()
+        assert status_data.get("complete") is True, (
+            f"Test completion flag not set. Response: {status_data}"
+        )
+        assert status_data.get("token_matched") is True, (
+            f"Token did not match. Response: {status_data}"
         )
 
     def test_mcp_tool_discovery(self, mcp_test_server, tmp_path):
