@@ -8,6 +8,7 @@ import { ipcMain } from 'electron';
 import { IPC_CHANNELS } from '../../shared/constants/ipc';
 import type { CustomMcpServer, McpHealthCheckResult, McpHealthStatus, McpTestConnectionResult } from '../../shared/types/project';
 import { spawn } from 'child_process';
+import os from 'os';
 import { appLog } from '../app-logger';
 import { isWindows } from '../platform';
 
@@ -34,6 +35,75 @@ const DANGEROUS_FLAGS = new Set([
  * when shell: true is used on Windows
  */
 const SHELL_METACHARACTERS = ['&', '|', '>', '<', '^', '%', ';', '$', '`', '\n', '\r'];
+
+/**
+ * Represents a local network subnet that this machine is connected to.
+ */
+interface LocalSubnet {
+  address: number;  // IP as 32-bit unsigned integer
+  mask: number;     // Netmask as 32-bit unsigned integer
+}
+
+/**
+ * Cached local subnets to avoid repeated os.networkInterfaces() calls.
+ * Cache is acceptable for security: worst case is a newly added subnet
+ * is blocked until app restart.
+ */
+let cachedLocalSubnets: LocalSubnet[] | null = null;
+
+/**
+ * Convert an IPv4 address string to a 32-bit unsigned integer.
+ */
+export function ipToInt(ip: string): number {
+  return ip.split('.').reduce((acc, octet) => (acc << 8) + parseInt(octet, 10), 0) >>> 0;
+}
+
+/**
+ * Get all local subnets that this machine is directly connected to.
+ * Uses os.networkInterfaces() to discover network configuration.
+ */
+export function getLocalSubnets(): LocalSubnet[] {
+  if (cachedLocalSubnets) return cachedLocalSubnets;
+
+  const subnets: LocalSubnet[] = [];
+  const interfaces = os.networkInterfaces();
+
+  for (const iface of Object.values(interfaces)) {
+    if (!iface) continue;
+    for (const info of iface) {
+      // Only consider external (non-loopback) IPv4 interfaces
+      if (info.family === 'IPv4' && !info.internal) {
+        subnets.push({
+          address: ipToInt(info.address),
+          mask: ipToInt(info.netmask),
+        });
+      }
+    }
+  }
+
+  cachedLocalSubnets = subnets;
+  return subnets;
+}
+
+/**
+ * Clear the cached local subnets (useful for testing).
+ */
+export function clearLocalSubnetCache(): void {
+  cachedLocalSubnets = null;
+}
+
+/**
+ * Check if an IPv4 address is within one of the local subnets.
+ * This allows access to MCP servers on the same LAN as this machine.
+ */
+export function isInLocalSubnet(ip: string): boolean {
+  const ipInt = ipToInt(ip);
+  const subnets = getLocalSubnets();
+
+  return subnets.some(subnet =>
+    (ipInt & subnet.mask) === (subnet.address & subnet.mask)
+  );
+}
 
 /**
  * Validate that a command is in the safe allowlist
@@ -88,19 +158,37 @@ export function isUrlAllowed(url: string): { allowed: boolean; reason?: string }
       return { allowed: true };
     }
 
-    // Block private IP ranges to prevent SSRF attacks on internal networks
+    // Check for private IP ranges and special addresses
     const ipMatch = hostname.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
     if (ipMatch) {
-      const [, a, b] = ipMatch.map(Number);
-      // Block Class A private (10.0.0.0/8)
-      // Block link-local/cloud metadata (169.254.0.0/16)
-      // Block Class C private (192.168.0.0/16)
-      // Block Class B private (172.16.0.0/12)
-      if (a === 10 ||
-          (a === 169 && b === 254) ||
-          (a === 192 && b === 168) ||
-          (a === 172 && b >= 16 && b <= 31)) {
-        return { allowed: false, reason: 'Private IP addresses are not allowed (except localhost)' };
+      const [, a, b, c, d] = ipMatch.map(Number);
+
+      // Block 0.0.0.0 - it's not a valid destination address
+      // (used for binding servers to all interfaces, not for connecting)
+      if (a === 0 && b === 0 && c === 0 && d === 0) {
+        return { allowed: false, reason: 'Invalid destination address' };
+      }
+
+      // ALWAYS block link-local/cloud metadata (169.254.0.0/16) - security critical
+      // Cloud providers (AWS, GCP, Azure) use 169.254.169.254 for instance metadata
+      // which can expose sensitive credentials and configuration
+      if (a === 169 && b === 254) {
+        return { allowed: false, reason: 'Link-local/cloud metadata addresses are not allowed' };
+      }
+
+      // Check if this is a private IP range
+      const isPrivateIp =
+        a === 10 ||                           // Class A private (10.0.0.0/8)
+        (a === 192 && b === 168) ||           // Class C private (192.168.0.0/16)
+        (a === 172 && b >= 16 && b <= 31);    // Class B private (172.16.0.0/12)
+
+      if (isPrivateIp) {
+        // Allow if the IP is in one of our local subnets (same LAN)
+        if (isInLocalSubnet(hostname)) {
+          return { allowed: true };
+        }
+        // Block other private IPs not on our network
+        return { allowed: false, reason: 'Private IP addresses are not allowed (except localhost and local network)' };
       }
     }
 
@@ -330,13 +418,16 @@ async function checkCommandHealth(server: CustomMcpServer, startTime: number): P
     };
   }
 
+  // Store command in local variable for type narrowing inside Promise callback
+  const serverCommand = server.command;
+
   return new Promise((resolve) => {
     // Defense-in-depth: Validate command and args before spawn
-    if (!isCommandSafe(server.command)) {
+    if (!isCommandSafe(serverCommand)) {
       return resolve({
         serverId: server.id,
         status: 'unhealthy',
-        message: `Invalid command '${server.command}' - not in allowlist`,
+        message: `Invalid command '${serverCommand}' - not in allowlist`,
         checkedAt: new Date().toISOString(),
       });
     }
@@ -349,8 +440,8 @@ async function checkCommandHealth(server: CustomMcpServer, startTime: number): P
       });
     }
 
-    const command = isWindows() ? 'where' : 'which';
-    const proc = spawn(command, [server.command!], {
+    const whichCommand = isWindows() ? 'where' : 'which';
+    const proc = spawn(whichCommand, [serverCommand], {
       timeout: 5000,
     });
 
@@ -363,7 +454,7 @@ async function checkCommandHealth(server: CustomMcpServer, startTime: number): P
         resolve({
           serverId: server.id,
           status: 'healthy',
-          message: `Command '${server.command}' found`,
+          message: `Command '${serverCommand}' found`,
           responseTime,
           checkedAt: new Date().toISOString(),
         });
@@ -371,7 +462,7 @@ async function checkCommandHealth(server: CustomMcpServer, startTime: number): P
         resolve({
           serverId: server.id,
           status: 'unhealthy',
-          message: `Command '${server.command}' not found in PATH`,
+          message: `Command '${serverCommand}' not found in PATH`,
           responseTime,
           checkedAt: new Date().toISOString(),
         });
@@ -387,7 +478,7 @@ async function checkCommandHealth(server: CustomMcpServer, startTime: number): P
       resolve({
         serverId: server.id,
         status: 'unhealthy',
-        message: `Failed to check command '${server.command}'`,
+        message: `Failed to check command '${serverCommand}'`,
         responseTime,
         checkedAt: new Date().toISOString(),
       });
@@ -716,13 +807,16 @@ async function testCommandConnection(server: CustomMcpServer, startTime: number)
     };
   }
 
+  // Store command in local variable for type narrowing inside Promise callback
+  const serverCommand = server.command;
+
   return new Promise((resolve) => {
     // Defense-in-depth: Validate command and args before spawn
-    if (!isCommandSafe(server.command)) {
+    if (!isCommandSafe(serverCommand)) {
       return resolve({
         serverId: server.id,
         success: false,
-        message: `Invalid command '${server.command}' - not in allowlist`,
+        message: `Invalid command '${serverCommand}' - not in allowlist`,
       });
     }
     if (!areArgsSafe(server.args)) {
@@ -736,7 +830,7 @@ async function testCommandConnection(server: CustomMcpServer, startTime: number)
     const args = server.args || [];
 
     // On Windows, use shell: true to properly handle .cmd/.bat scripts like npx
-    const proc = spawn(server.command!, args, {
+    const proc = spawn(serverCommand, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       timeout: 15000, // OS-level timeout for reliable process termination
       shell: isWindows(), // Required for Windows to run npx.cmd
