@@ -444,6 +444,16 @@ async function testHttpConnection(server: CustomMcpServer, startTime: number): P
     };
   }
 
+  // Defense-in-depth: Validate URL to prevent SSRF attacks
+  const urlValidation = isUrlAllowed(server.url);
+  if (!urlValidation.allowed) {
+    return {
+      serverId: server.id,
+      success: false,
+      message: urlValidation.reason || 'URL not allowed',
+    };
+  }
+
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 30000); // 30 second timeout
@@ -574,6 +584,16 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
       serverId: server.id,
       success: false,
       message: 'No URL configured',
+    };
+  }
+
+  // Defense-in-depth: Validate URL to prevent SSRF attacks
+  const urlValidation = isUrlAllowed(server.url);
+  if (!urlValidation.allowed) {
+    return {
+      serverId: server.id,
+      success: false,
+      message: urlValidation.reason || 'URL not allowed',
     };
   }
 
