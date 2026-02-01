@@ -92,15 +92,15 @@ def mark_test_complete(confirmation: str) -> str:
 
 def add_custom_endpoints(app):
     """
-    Add custom HTTP endpoints to the FastAPI app.
+    Add custom HTTP endpoints to the Starlette app.
 
     Args:
-        app: The FastAPI/Starlette application instance
+        app: The Starlette application instance
     """
-    from fastapi.responses import JSONResponse
+    from starlette.responses import JSONResponse
+    from starlette.routing import Route
 
-    @app.get("/test-status")
-    async def test_status():
+    async def test_status(request):
         """
         Get the current test completion status.
 
@@ -114,6 +114,9 @@ def add_custom_endpoints(app):
                     "token_matched": TEST_COMPLETE_FLAG,
                 }
             )
+
+    # Add the route to the app's routes
+    app.routes.append(Route("/test-status", test_status, methods=["GET"]))
 
 
 # =============================================================================

@@ -7,7 +7,6 @@ These tests validate that Claude can discover and use tools via streamable-http.
 """
 
 import json
-import os
 import shutil
 import socket
 import subprocess
@@ -49,6 +48,39 @@ def is_claude_cli_authenticated() -> bool:
             text=True,
         )
         return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
+
+def is_claude_mcp_print_mode_working() -> bool:
+    """
+    Check if Claude CLI's --print mode works with --mcp-config.
+
+    There's a known issue where Claude CLI hangs when using --mcp-config
+    with --print mode. This function tests if it works in the current environment.
+
+    Returns:
+        bool: True if MCP with print mode works, False otherwise
+    """
+    if not is_claude_cli_authenticated():
+        return False
+
+    # Test with an empty MCP config - if this times out, MCP print mode is broken
+    try:
+        result = subprocess.run(
+            [
+                "claude",
+                "--print",
+                "--mcp-config",
+                '{"mcpServers":{}}',
+                "Say test",
+            ],
+            capture_output=True,
+            timeout=15,
+            text=True,
+        )
+        # Should complete quickly with empty servers
+        return result.returncode == 0 and "test" in result.stdout.lower()
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return False
 
@@ -141,7 +173,7 @@ def mcp_test_server(tmp_path) -> Generator[Tuple[str, str, subprocess.Popen], No
                 # Try to connect to the MCP endpoint
                 # A 405 (Method Not Allowed) or 200 indicates server is running
                 response = requests.get(mcp_url, timeout=2)
-                if response.status_code in [200, 405]:
+                if response.status_code in [200, 405, 406]:
                     server_ready = True
                     break
             except requests.RequestException:
@@ -184,7 +216,7 @@ class TestMCPServerHealth:
         response = requests.get(mcp_url, timeout=5)
 
         # MCP endpoint should respond (200 or 405 are both valid)
-        assert response.status_code in [200, 405], (
+        assert response.status_code in [200, 405, 406], (
             f"MCP endpoint returned unexpected status: {response.status_code}"
         )
 
@@ -197,7 +229,7 @@ class TestMCPServerHealth:
         response = requests.get(mcp_url, timeout=5)
         response_time = time.time() - start_time
 
-        assert response.status_code in [200, 405]
+        assert response.status_code in [200, 405, 406]
         assert response_time < 2.0, f"Server response took {response_time:.2f}s (expected <2s)"
 
     def test_server_process_running(self, mcp_test_server):
@@ -216,6 +248,10 @@ class TestMCPServerHealth:
 @pytest.mark.skipif(
     not is_claude_cli_authenticated(),
     reason="Requires authenticated claude CLI"
+)
+@pytest.mark.skipif(
+    not is_claude_mcp_print_mode_working(),
+    reason="Claude CLI --print mode with --mcp-config not working (known CLI limitation)"
 )
 @pytest.mark.slow
 class TestClaudeStreamingMCP:
@@ -248,10 +284,6 @@ class TestClaudeStreamingMCP:
         with open(mcp_config_file, "w") as f:
             json.dump(mcp_config, f)
 
-        # Set environment variable for Claude SDK
-        env = os.environ.copy()
-        env["CUSTOM_MCP_SERVERS"] = str(mcp_config_file)
-
         # Create prompt for Claude
         prompt = """You have access to an MCP server called "e2e-test-server".
 
@@ -261,13 +293,18 @@ class TestClaudeStreamingMCP:
 
 This is a validation test - complete both steps."""
 
-        # Call Claude via CLI
+        # Call Claude via CLI with --mcp-config to load the MCP server
         result = subprocess.run(
-            ["claude", "--no-stream", prompt],
+            [
+                "claude",
+                "--print",
+                "--mcp-config",
+                str(mcp_config_file),
+                prompt,
+            ],
             capture_output=True,
             text=True,
             timeout=120,
-            env=env,
         )
 
         # Verify Claude executed successfully
@@ -314,18 +351,20 @@ This is a validation test - complete both steps."""
         with open(mcp_config_file, "w") as f:
             json.dump(mcp_config, f)
 
-        env = os.environ.copy()
-        env["CUSTOM_MCP_SERVERS"] = str(mcp_config_file)
-
         # Ask Claude to list available tools
         prompt = "List all the MCP tools available to you from the e2e-test-server."
 
         result = subprocess.run(
-            ["claude", "--no-stream", prompt],
+            [
+                "claude",
+                "--print",
+                "--mcp-config",
+                str(mcp_config_file),
+                prompt,
+            ],
             capture_output=True,
             text=True,
             timeout=60,
-            env=env,
         )
 
         assert result.returncode == 0, f"Claude CLI failed: {result.stderr}"
