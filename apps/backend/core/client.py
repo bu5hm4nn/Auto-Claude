@@ -309,6 +309,52 @@ def _validate_custom_mcp_server(server: dict) -> bool:
     return True
 
 
+def build_custom_mcp_servers(
+    custom_servers: list[dict], required_servers: list[str]
+) -> dict[str, dict]:
+    """
+    Build MCP server configurations from custom server definitions.
+
+    Converts custom MCP server definitions from CUSTOM_MCP_SERVERS config into
+    the format expected by the Claude SDK's mcp_servers parameter.
+
+    Only includes servers that are in the required_servers list (which is
+    determined by AGENT_MCP_<agent>_ADD settings).
+
+    Args:
+        custom_servers: List of custom server dicts from CUSTOM_MCP_SERVERS
+        required_servers: List of server IDs that should be included
+
+    Returns:
+        Dict mapping server IDs to their SDK configurations
+    """
+    mcp_servers: dict[str, dict] = {}
+
+    for custom in custom_servers:
+        server_id = custom.get("id")
+        if not server_id:
+            continue
+        # Only include if agent has it in their effective server list
+        if server_id not in required_servers:
+            continue
+        server_type = custom.get("type", "command")
+        if server_type == "command":
+            mcp_servers[server_id] = {
+                "command": custom.get("command", "npx"),
+                "args": custom.get("args", []),
+            }
+        elif server_type in ("http", "streamable-http"):
+            server_config: dict = {
+                "type": server_type,
+                "url": custom.get("url", ""),
+            }
+            if custom.get("headers"):
+                server_config["headers"] = custom["headers"]
+            mcp_servers[server_id] = server_config
+
+    return mcp_servers
+
+
 def load_project_mcp_config(project_dir: Path) -> dict:
     """
     Load MCP configuration from project's .auto-claude/.env file.
@@ -748,27 +794,8 @@ def create_client(
 
     # Add custom MCP servers from project config
     custom_servers = mcp_config.get("CUSTOM_MCP_SERVERS", [])
-    for custom in custom_servers:
-        server_id = custom.get("id")
-        if not server_id:
-            continue
-        # Only include if agent has it in their effective server list
-        if server_id not in required_servers:
-            continue
-        server_type = custom.get("type", "command")
-        if server_type == "command":
-            mcp_servers[server_id] = {
-                "command": custom.get("command", "npx"),
-                "args": custom.get("args", []),
-            }
-        elif server_type == "http":
-            server_config = {
-                "type": "http",
-                "url": custom.get("url", ""),
-            }
-            if custom.get("headers"):
-                server_config["headers"] = custom["headers"]
-            mcp_servers[server_id] = server_config
+    custom_mcp = build_custom_mcp_servers(custom_servers, required_servers)
+    mcp_servers.update(custom_mcp)
 
     # Build system prompt
     base_prompt = (
