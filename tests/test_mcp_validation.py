@@ -236,3 +236,178 @@ class TestValidateCustomMcpServer:
                 "command": cmd,
             }
             assert _validate_custom_mcp_server(server) is True, f"Command {cmd} should be valid"
+
+
+class TestCustomMcpServerBuilding:
+    """Tests for building MCP server configs from CUSTOM_MCP_SERVERS.
+
+    These tests verify that custom MCP servers defined in .auto-claude/.env
+    are correctly converted to the mcp_servers dict format used by the SDK.
+    """
+
+    def test_command_type_server_added(self):
+        """Command-type custom MCP servers are added to mcp_servers."""
+        from core.client import build_custom_mcp_servers
+
+        custom_servers = [{
+            "id": "my-command-server",
+            "name": "My Command Server",
+            "type": "command",
+            "command": "npx",
+            "args": ["-y", "my-mcp-server"],
+        }]
+
+        result = build_custom_mcp_servers(
+            custom_servers,
+            required_servers=["my-command-server"]
+        )
+
+        assert "my-command-server" in result
+        assert result["my-command-server"]["command"] == "npx"
+        assert result["my-command-server"]["args"] == ["-y", "my-mcp-server"]
+
+    def test_http_type_server_added(self):
+        """HTTP-type custom MCP servers are added to mcp_servers."""
+        from core.client import build_custom_mcp_servers
+
+        custom_servers = [{
+            "id": "my-http-server",
+            "name": "My HTTP Server",
+            "type": "http",
+            "url": "https://example.com/mcp",
+        }]
+
+        result = build_custom_mcp_servers(
+            custom_servers,
+            required_servers=["my-http-server"]
+        )
+
+        assert "my-http-server" in result
+        assert result["my-http-server"]["type"] == "http"
+        assert result["my-http-server"]["url"] == "https://example.com/mcp"
+
+    def test_streamable_http_type_server_added(self):
+        """Streamable-http-type custom MCP servers are added to mcp_servers.
+
+        This is a regression test for the bug where streamable-http servers
+        were validated but then silently dropped when building mcp_servers.
+        """
+        from core.client import build_custom_mcp_servers
+
+        custom_servers = [{
+            "id": "docker-mcp",
+            "name": "Docker MCP",
+            "type": "streamable-http",
+            "url": "http://localhost:30000/mcp",
+            "headers": {"Authorization": "Bearer test-token"},
+        }]
+
+        result = build_custom_mcp_servers(
+            custom_servers,
+            required_servers=["docker-mcp"]
+        )
+
+        assert "docker-mcp" in result, "streamable-http server should be added to mcp_servers"
+        assert result["docker-mcp"]["type"] == "streamable-http"
+        assert result["docker-mcp"]["url"] == "http://localhost:30000/mcp"
+        assert result["docker-mcp"]["headers"] == {"Authorization": "Bearer test-token"}
+
+    def test_http_server_with_headers(self):
+        """HTTP servers with custom headers have headers preserved."""
+        from core.client import build_custom_mcp_servers
+
+        custom_servers = [{
+            "id": "auth-http-server",
+            "name": "Auth HTTP Server",
+            "type": "http",
+            "url": "https://api.example.com/mcp",
+            "headers": {
+                "Authorization": "Bearer my-token",
+                "X-Custom-Header": "custom-value",
+            },
+        }]
+
+        result = build_custom_mcp_servers(
+            custom_servers,
+            required_servers=["auth-http-server"]
+        )
+
+        assert result["auth-http-server"]["headers"]["Authorization"] == "Bearer my-token"
+        assert result["auth-http-server"]["headers"]["X-Custom-Header"] == "custom-value"
+
+    def test_server_not_in_required_servers_not_added(self):
+        """Custom servers not in required_servers list are not added."""
+        from core.client import build_custom_mcp_servers
+
+        custom_servers = [{
+            "id": "my-server",
+            "name": "My Server",
+            "type": "streamable-http",
+            "url": "http://localhost:8000/mcp",
+        }]
+
+        # Server is defined but not in required_servers
+        result = build_custom_mcp_servers(
+            custom_servers,
+            required_servers=["other-server"]  # my-server not included
+        )
+
+        assert "my-server" not in result
+
+    def test_multiple_custom_servers(self):
+        """Multiple custom servers of different types are all added."""
+        from core.client import build_custom_mcp_servers
+
+        custom_servers = [
+            {
+                "id": "command-server",
+                "name": "Command Server",
+                "type": "command",
+                "command": "node",
+                "args": ["server.js"],
+            },
+            {
+                "id": "http-server",
+                "name": "HTTP Server",
+                "type": "http",
+                "url": "https://api.example.com/mcp",
+            },
+            {
+                "id": "streamable-server",
+                "name": "Streamable Server",
+                "type": "streamable-http",
+                "url": "http://localhost:3000/mcp",
+            },
+        ]
+
+        result = build_custom_mcp_servers(
+            custom_servers,
+            required_servers=["command-server", "http-server", "streamable-server"]
+        )
+
+        assert len(result) == 3
+        assert "command-server" in result
+        assert "http-server" in result
+        assert "streamable-server" in result
+
+        # Verify each type is correct
+        assert "command" in result["command-server"]
+        assert result["http-server"]["type"] == "http"
+        assert result["streamable-server"]["type"] == "streamable-http"
+
+    def test_server_without_id_skipped(self):
+        """Servers without an id field are skipped."""
+        from core.client import build_custom_mcp_servers
+
+        custom_servers = [{
+            "name": "No ID Server",
+            "type": "http",
+            "url": "https://example.com/mcp",
+        }]
+
+        result = build_custom_mcp_servers(
+            custom_servers,
+            required_servers=[]
+        )
+
+        assert len(result) == 0
