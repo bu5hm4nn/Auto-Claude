@@ -333,8 +333,9 @@ async function checkHttpHealth(server: CustomMcpServer, startTime: number): Prom
 }
 
 /**
- * Check Streamable HTTP server health by making a request with proper MCP Accept header.
- * Streamable HTTP servers (MCP spec 2025-03-26) support both JSON and SSE responses.
+ * Check Streamable HTTP server health by sending an MCP initialize request.
+ * Streamable HTTP servers (MCP spec 2025-03-26) only accept POST requests with JSON-RPC payloads.
+ * GET requests will return 400/405/406, so we must use POST with a proper MCP request.
  */
 async function checkStreamableHttpHealth(server: CustomMcpServer, startTime: number): Promise<McpHealthCheckResult> {
   if (!server.url) {
@@ -363,6 +364,7 @@ async function checkStreamableHttpHealth(server: CustomMcpServer, startTime: num
 
     // Streamable HTTP requires Accept header with both JSON and SSE support
     const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
       'Accept': 'application/json, text/event-stream',
     };
 
@@ -371,9 +373,25 @@ async function checkStreamableHttpHealth(server: CustomMcpServer, startTime: num
       Object.assign(headers, server.headers);
     }
 
+    // MCP servers only accept POST with JSON-RPC, so send an initialize request
+    const initRequest = {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2025-03-26',
+        capabilities: {},
+        clientInfo: {
+          name: 'auto-claude-health-check',
+          version: '1.0.0',
+        },
+      },
+    };
+
     const response = await fetch(server.url, {
-      method: 'GET',
+      method: 'POST',
       headers,
+      body: JSON.stringify(initRequest),
       signal: controller.signal,
     });
 
@@ -741,7 +759,24 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
       };
     }
 
-    const data = await response.json();
+    // Streamable HTTP servers may return SSE (text/event-stream) or JSON
+    const contentType = response.headers.get('content-type') || '';
+    let data: { error?: unknown; result?: unknown };
+
+    if (contentType.includes('text/event-stream')) {
+      // Parse SSE response - extract JSON from "data:" lines
+      const text = await response.text();
+      const dataLines = text.split('\n').filter(line => line.startsWith('data:'));
+      if (dataLines.length > 0) {
+        const jsonStr = dataLines[0].substring(5).trim(); // Remove "data:" prefix
+        data = JSON.parse(jsonStr);
+      } else {
+        // No data lines but response was OK - server is responding
+        data = { result: {} };
+      }
+    } else {
+      data = await response.json();
+    }
 
     if (data.error) {
       return {
@@ -775,7 +810,23 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
       clearTimeout(toolsTimeout);
 
       if (toolsResponse.ok) {
-        const toolsData = await toolsResponse.json();
+        // Handle SSE or JSON response for streamable HTTP
+        const toolsContentType = toolsResponse.headers.get('content-type') || '';
+        let toolsData: { result?: { tools?: Array<{ name: string }> } };
+
+        if (toolsContentType.includes('text/event-stream')) {
+          const text = await toolsResponse.text();
+          const dataLines = text.split('\n').filter(line => line.startsWith('data:'));
+          if (dataLines.length > 0) {
+            const jsonStr = dataLines[0].substring(5).trim();
+            toolsData = JSON.parse(jsonStr);
+          } else {
+            toolsData = {};
+          }
+        } else {
+          toolsData = await toolsResponse.json();
+        }
+
         if (toolsData.result?.tools) {
           tools = toolsData.result.tools.map((t: { name: string }) => t.name);
         }
