@@ -344,8 +344,10 @@ def build_custom_mcp_servers(
                 "args": custom.get("args", []),
             }
         elif server_type in ("http", "streamable-http"):
+            # Claude CLI uses "http" for both SSE and Streamable HTTP transports
+            # and auto-discovers the actual protocol from the server
             server_config: dict = {
-                "type": server_type,
+                "type": "http",
                 "url": custom.get("url", ""),
             }
             if custom.get("headers"):
@@ -570,6 +572,18 @@ def create_client(
     # Load per-project MCP configuration from .auto-claude/.env
     mcp_config = load_project_mcp_config(project_dir)
 
+    # Debug: Log MCP configuration for troubleshooting
+    print(f"[MCP DEBUG] Agent type: {agent_type}")
+    print(f"[MCP DEBUG] Project dir: {project_dir}")
+    print(f"[MCP DEBUG] MCP config keys: {list(mcp_config.keys())}")
+    if "CUSTOM_MCP_SERVERS" in mcp_config:
+        custom_servers_debug = mcp_config["CUSTOM_MCP_SERVERS"]
+        print(f"[MCP DEBUG] Custom MCP servers count: {len(custom_servers_debug)}")
+        for srv in custom_servers_debug:
+            print(f"[MCP DEBUG]   - {srv.get('id')}: type={srv.get('type')}, url={srv.get('url', 'N/A')}")
+    else:
+        print("[MCP DEBUG] No CUSTOM_MCP_SERVERS in config")
+
     # Get allowed tools using phase-aware configuration
     # This respects AGENT_CONFIGS and only includes tools the agent needs
     # Also respects per-project MCP configuration
@@ -581,6 +595,7 @@ def create_client(
     )
 
     # Get required MCP servers for this agent type
+    # (need this before adding custom MCP tools to allowed_tools_list)
     # This is the key optimization - only start servers the agent needs
     # Now also respects per-project MCP configuration
     required_servers = get_required_mcp_servers(
@@ -589,6 +604,17 @@ def create_client(
         linear_enabled,
         mcp_config,
     )
+    print(f"[MCP DEBUG] Required servers: {required_servers}")
+
+    # Add custom MCP server tools to allowed_tools_list
+    # For custom servers, we use a wildcard pattern since tool names are discovered dynamically
+    # This allows all tools from the custom MCP server (e.g., mcp__docker-mcp__*)
+    for srv in mcp_config.get("CUSTOM_MCP_SERVERS", []):
+        server_id = srv.get("id")
+        if server_id and server_id in required_servers:
+            # Add wildcard pattern to allow all tools from this custom MCP server
+            allowed_tools_list.append(f"mcp__{server_id}__*")
+            print(f"[MCP DEBUG] Added allowed tools pattern: mcp__{server_id}__*")
 
     # Check if Graphiti MCP is enabled (already filtered by get_required_mcp_servers)
     graphiti_mcp_enabled = "graphiti" in required_servers
@@ -696,6 +722,13 @@ def create_client(
                     else []
                 ),
                 *[f"{tool}(*)" for tool in browser_tools_permissions],
+                # Allow tools from custom MCP servers (wildcard pattern)
+                # Uses mcp__<server-id>__*(*) to allow all tools from each custom server
+                *[
+                    f"mcp__{srv.get('id')}__*(*)"
+                    for srv in mcp_config.get("CUSTOM_MCP_SERVERS", [])
+                    if srv.get("id") and srv.get("id") in required_servers
+                ],
             ],
         },
     }
@@ -796,6 +829,8 @@ def create_client(
     custom_servers = mcp_config.get("CUSTOM_MCP_SERVERS", [])
     custom_mcp = build_custom_mcp_servers(custom_servers, required_servers)
     mcp_servers.update(custom_mcp)
+    print(f"[MCP DEBUG] Custom MCP servers added: {list(custom_mcp.keys())}")
+    print(f"[MCP DEBUG] Final MCP servers: {list(mcp_servers.keys())}")
 
     # Build system prompt
     base_prompt = (
