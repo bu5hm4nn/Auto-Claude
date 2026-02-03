@@ -777,19 +777,33 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
     const contentType = response.headers.get('content-type') || '';
     let data: { error?: unknown; result?: unknown };
 
-    if (contentType.includes('text/event-stream')) {
-      // Parse SSE response - extract JSON from "data:" lines
-      const text = await response.text();
-      const dataLines = text.split('\n').filter(line => line.startsWith('data:'));
-      if (dataLines.length > 0) {
-        const jsonStr = dataLines[0].substring(5).trim(); // Remove "data:" prefix
-        data = JSON.parse(jsonStr);
+    try {
+      if (contentType.includes('text/event-stream')) {
+        // Parse SSE response - extract JSON from "data:" lines
+        const text = await response.text();
+        const dataLines = text.split('\n').filter(line => line.startsWith('data:'));
+        if (dataLines.length > 0) {
+          const jsonStr = dataLines[0].substring(5).trim(); // Remove "data:" prefix
+          if (!jsonStr) {
+            // Empty data line - server is responding but no payload
+            data = { result: {} };
+          } else {
+            data = JSON.parse(jsonStr);
+          }
+        } else {
+          // No data lines but response was OK - server is responding
+          data = { result: {} };
+        }
       } else {
-        // No data lines but response was OK - server is responding
-        data = { result: {} };
+        data = await response.json();
       }
-    } else {
-      data = await response.json();
+    } catch (parseError) {
+      return {
+        serverId: server.id,
+        success: false,
+        message: `Failed to parse server response: ${parseError instanceof Error ? parseError.message : 'Invalid JSON'}`,
+        responseTime,
+      };
     }
 
     if (data.error) {
