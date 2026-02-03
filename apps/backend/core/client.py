@@ -350,8 +350,12 @@ def build_custom_mcp_servers(
                 "type": "http",
                 "url": custom.get("url", ""),
             }
-            if custom.get("headers"):
-                server_config["headers"] = custom["headers"]
+            # Validate headers dict has string keys and values before passing to SDK
+            headers = custom.get("headers")
+            if isinstance(headers, dict) and all(
+                isinstance(k, str) and isinstance(v, str) for k, v in headers.items()
+            ):
+                server_config["headers"] = headers
             mcp_servers[server_id] = server_config
 
     return mcp_servers
