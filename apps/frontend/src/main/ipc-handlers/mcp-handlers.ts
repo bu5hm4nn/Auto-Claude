@@ -214,11 +214,12 @@ export function isUrlAllowed(url: string): { allowed: boolean; reason?: string }
  * This prevents exposing internal error details to users.
  */
 export function mapNetworkErrorToMessage(errorMessage: string): string {
-  if (errorMessage.includes('abort') || errorMessage.includes('timeout')) {
+  const msg = errorMessage.toLowerCase();
+  if (msg.includes('abort') || msg.includes('timeout') || msg.includes('etimedout')) {
     return 'Connection timed out';
-  } else if (errorMessage.includes('ECONNREFUSED')) {
+  } else if (msg.includes('econnrefused')) {
     return 'Connection refused - server may be down';
-  } else if (errorMessage.includes('ENOTFOUND')) {
+  } else if (msg.includes('enotfound')) {
     return 'Server not found - check URL';
   }
   return 'Connection failed';
@@ -765,19 +766,19 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
 
     try {
       if (contentType.includes('text/event-stream')) {
-        // Parse SSE response - extract JSON from "data:" lines
+        // Parse SSE response - extract and concatenate JSON from "data:" lines
+        // SSE spec allows multi-line data fields that should be joined
         const text = await response.text();
-        const dataLines = text.split('\n').filter(line => line.startsWith('data:'));
-        if (dataLines.length > 0) {
-          const jsonStr = dataLines[0].substring(5).trim(); // Remove "data:" prefix
-          if (!jsonStr) {
-            // Empty data line - server is responding but no payload
-            data = { result: {} };
-          } else {
-            data = JSON.parse(jsonStr);
-          }
+        const jsonStr = text
+          .split('\n')
+          .filter(line => line.startsWith('data:'))
+          .map(line => line.substring(5).trim())
+          .join('');
+
+        if (jsonStr) {
+          data = JSON.parse(jsonStr);
         } else {
-          // No data lines but response was OK - server is responding
+          // No data content but response was OK - server is responding
           data = { result: {} };
         }
       } else {
@@ -829,10 +830,15 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
         let toolsData: { result?: { tools?: Array<{ name: string }> } };
 
         if (toolsContentType.includes('text/event-stream')) {
+          // Parse SSE response - concatenate multi-line data fields
           const text = await toolsResponse.text();
-          const dataLines = text.split('\n').filter(line => line.startsWith('data:'));
-          if (dataLines.length > 0) {
-            const jsonStr = dataLines[0].substring(5).trim();
+          const jsonStr = text
+            .split('\n')
+            .filter(line => line.startsWith('data:'))
+            .map(line => line.substring(5).trim())
+            .join('');
+
+          if (jsonStr) {
             toolsData = JSON.parse(jsonStr);
           } else {
             toolsData = {};
