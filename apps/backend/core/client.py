@@ -572,17 +572,12 @@ def create_client(
     # Load per-project MCP configuration from .auto-claude/.env
     mcp_config = load_project_mcp_config(project_dir)
 
-    # Debug: Log MCP configuration for troubleshooting
-    print(f"[MCP DEBUG] Agent type: {agent_type}")
-    print(f"[MCP DEBUG] Project dir: {project_dir}")
-    print(f"[MCP DEBUG] MCP config keys: {list(mcp_config.keys())}")
-    if "CUSTOM_MCP_SERVERS" in mcp_config:
-        custom_servers_debug = mcp_config["CUSTOM_MCP_SERVERS"]
-        print(f"[MCP DEBUG] Custom MCP servers count: {len(custom_servers_debug)}")
-        for srv in custom_servers_debug:
-            print(f"[MCP DEBUG]   - {srv.get('id')}: type={srv.get('type')}, url={srv.get('url', 'N/A')}")
-    else:
-        print("[MCP DEBUG] No CUSTOM_MCP_SERVERS in config")
+    # Debug logging for MCP configuration (only when DEBUG=true)
+    # Note: Only log server count, not URLs which may contain sensitive info
+    debug = os.environ.get("DEBUG", "").lower() in ("true", "1")
+    if debug:
+        custom_count = len(mcp_config.get("CUSTOM_MCP_SERVERS", []))
+        logger.debug(f"MCP config: agent={agent_type}, custom_servers={custom_count}")
 
     # Get allowed tools using phase-aware configuration
     # This respects AGENT_CONFIGS and only includes tools the agent needs
@@ -604,7 +599,8 @@ def create_client(
         linear_enabled,
         mcp_config,
     )
-    print(f"[MCP DEBUG] Required servers: {required_servers}")
+    if debug:
+        logger.debug(f"Required MCP servers: {required_servers}")
 
     # Add custom MCP server tools to allowed_tools_list
     # For custom servers, we use a wildcard pattern since tool names are discovered dynamically
@@ -614,7 +610,8 @@ def create_client(
         if server_id and server_id in required_servers:
             # Add wildcard pattern to allow all tools from this custom MCP server
             allowed_tools_list.append(f"mcp__{server_id}__*")
-            print(f"[MCP DEBUG] Added allowed tools pattern: mcp__{server_id}__*")
+            if debug:
+                logger.debug(f"Added allowed tools pattern: mcp__{server_id}__*")
 
     # Check if Graphiti MCP is enabled (already filtered by get_required_mcp_servers)
     graphiti_mcp_enabled = "graphiti" in required_servers
@@ -829,8 +826,9 @@ def create_client(
     custom_servers = mcp_config.get("CUSTOM_MCP_SERVERS", [])
     custom_mcp = build_custom_mcp_servers(custom_servers, required_servers)
     mcp_servers.update(custom_mcp)
-    print(f"[MCP DEBUG] Custom MCP servers added: {list(custom_mcp.keys())}")
-    print(f"[MCP DEBUG] Final MCP servers: {list(mcp_servers.keys())}")
+    if debug:
+        logger.debug(f"Custom MCP servers added: {list(custom_mcp.keys())}")
+        logger.debug(f"Final MCP servers: {list(mcp_servers.keys())}")
 
     # Build system prompt
     base_prompt = (
