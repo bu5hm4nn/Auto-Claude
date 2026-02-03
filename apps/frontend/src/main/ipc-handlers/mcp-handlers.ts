@@ -657,7 +657,7 @@ async function testHttpConnection(server: CustomMcpServer, startTime: number): P
     } catch (toolsError) {
       // Tools listing is optional - don't fail the connection test
       clearTimeout(toolsTimeout);
-      appLog.debug(`MCP tools/list request failed for ${server.id}:`, toolsError);
+      appLog.debug(`MCP tools/list request failed for ${server.id}: ${toolsError instanceof Error ? toolsError.message : 'Unknown error'}`);
     }
 
     return {
@@ -848,7 +848,7 @@ async function testStreamableHttpConnection(server: CustomMcpServer, startTime: 
     } catch (toolsError) {
       // Tools listing is optional - don't fail the connection test
       clearTimeout(toolsTimeout);
-      appLog.debug(`MCP tools/list request failed for ${server.id}:`, toolsError);
+      appLog.debug(`MCP tools/list request failed for ${server.id}: ${toolsError instanceof Error ? toolsError.message : 'Unknown error'}`);
     }
 
     return {
